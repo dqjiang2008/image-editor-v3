@@ -1,0 +1,54 @@
+# 忽略 Python 缓存
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+
+# 虚拟环境
+venv/
+env/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*.sublime-*
+
+# 操作系统
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 敏感配置文件（包含 API Key）
+data/config.json
+data/config.json.bak
+
+# 项目数据（运行时生成，体积较大）
+data/logs/
+data/projects/
+data/debug/
+data/asset_library/
+
+# 调试 / 临时输出文件
+_temp
+_test_
+_check_
+_debug_
+_smoke_
+_e2e_
+_ff*
+_mt.txt
+_pk.txt
+*.mp3
+*.json.bak
+想更新.txt
+
+# 日志文件
+*.log
+
+# 临时文件
+*.tmp
+*.temp
+~$*
