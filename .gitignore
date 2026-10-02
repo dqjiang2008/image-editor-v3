@@ -52,3 +52,11 @@ _pk.txt
 *.tmp
 *.temp
 ~$*
+
+# 本地工具脚本
+create_and_push.ps1
+diagnose.bat
+setup_github_auth.bat
+build_release.bat
+RELEASE_TEMPLATE.md
+SCREENSHOTS.md
