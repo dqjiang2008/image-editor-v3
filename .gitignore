@@ -53,6 +53,12 @@ _pk.txt
 *.temp
 ~$*
 
+# FFmpeg 工具（文件太大，不能提交到 GitHub）
+tools/ffmpeg/
+tools/ffmpeg/bin/ffmpeg.exe
+tools/ffmpeg/bin/ffprobe.exe
+*.exe
+
 # 本地工具脚本
 create_and_push.ps1
 diagnose.bat
@@ -60,3 +66,5 @@ setup_github_auth.bat
 build_release.bat
 RELEASE_TEMPLATE.md
 SCREENSHOTS.md
+push_to_github.bat
+verify_push.ps1
