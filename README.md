@@ -18,23 +18,31 @@
 
 ## 📸 界面预览
 
-> 💡 **提示**：请将实际截图保存到 `screenshots/` 目录，然后替换下方的占位图片路径。
-
 <div align="center">
 
 ### 主界面
-![主界面](screenshots/main-interface.png)
+![主界面](screenshots/screen.png)
+
+### 系统设置
+![系统设置](screenshots/sys_setup.png)
+
+### 项目管理
+![项目管理](screenshots/project.png)
 
 ### 故事生成
-![故事生成](screenshots/story-generation.png)
+![故事生成](screenshots/story.png)
 
 ### 角色管理
-![角色管理](screenshots/character-management.png)
+![角色管理](screenshots/character.png)
 
 ### 分镜编辑
-![分镜编辑](screenshots/storyboard-editing.png)
+![分镜编辑](screenshots/frame_003.png)
 
-**[查看更多截图 →](SCREENSHOTS.md)**
+### 视频预览
+![视频预览](screenshots/video.png)
+
+### 其他界面
+![界面截图2](screenshots/screen2.png)
 
 </div>
 
