@@ -7,8 +7,8 @@
 [![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://www.python.org/)
 [![PyQt6](https://img.shields.io/badge/GUI-PyQt6-green.svg)](https://www.riverbankcomputing.com/software/pyqt/)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey.svg)](https://github.com/)
-[![Release](https://img.shields.io/github/v/release/YOUR_USERNAME/image-editor-v3)](https://github.com/YOUR_USERNAME/image-editor-v3/releases)
+[![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey.svg)](https://github.com/dqjiang2008/image-editor-v3)
+[![Release](https://img.shields.io/github/v/release/dqjiang2008/image-editor-v3)](https://github.com/dqjiang2008/image-editor-v3/releases)
 
 [English](#-english) | [中文文档](#-功能特性)
 
@@ -333,6 +333,6 @@ Set your API key via:
 
 **Made with ❤️ by AI Assistant**
 
-[⭐ Star this repo](https://github.com/YOUR_USERNAME/image-editor-v3) | [🐛 Report Bug](https://github.com/YOUR_USERNAME/image-editor-v3/issues) | [💡 Request Feature](https://github.com/YOUR_USERNAME/image-editor-v3/issues)
+[⭐ Star this repo](https://github.com/dqjiang2008/image-editor-v3) | [🐛 Report Bug](https://github.com/dqjiang2008/image-editor-v3/issues) | [💡 Request Feature](https://github.com/dqjiang2008/image-editor-v3/issues)
 
 </div>
