@@ -1120,6 +1120,16 @@ class AnimationProducer:
         self.project_manager = project_manager
         # 本集「场景未匹配」清单：只累计、每集末尾汇总一条告警（避免逐条刷屏）
         self._sb_scene_unmatched = []
+    
+    def _get_image_size(self) -> str:
+        """根据项目配置返回帧图生成尺寸"""
+        orientation = getattr(self.project, 'video_orientation', 'landscape')
+        return "720x1280" if orientation == "portrait" else "1280x720"
+    
+    def _get_video_size(self) -> str:
+        """根据项目配置返回视频生成尺寸"""
+        orientation = getattr(self.project, 'video_orientation', 'landscape')
+        return "720P"  # AGNES API 视频尺寸参数，横竖屏由 API 自动适配
 
     # ------------------------------------------------------------------
     # 技能包上下文（resources/skills/ 接入点）
@@ -3474,10 +3484,10 @@ class AnimationProducer:
                         prompt += ref_text
                     self._log(f"分镜 {sb.scene_number} 使用 {len(ref_urls)} 张参考图（img2img）")
                     image_data = await self.client.generate_image(
-                        prompt, size="1280x720", image=ref_urls, max_retries=12
+                        prompt, size=self._get_image_size(), image=ref_urls, max_retries=12
                     )
                 else:
-                    image_data = await self.client.generate_image(prompt, size="1280x720", max_retries=12)
+                    image_data = await self.client.generate_image(prompt, size=self._get_image_size(), max_retries=12)
                 frame_dir = self._get_episode_frames_dir()
                 frame_path = frame_dir / f"frame_{sb.scene_number:03d}.png"
                 with open(frame_path, "wb") as f:
@@ -3522,10 +3532,10 @@ class AnimationProducer:
                     prompt += ref_text
                 self._log(f"分镜 {storyboard.scene_number} 使用 {len(ref_urls)} 张参考图（img2img）")
                 image_data = await self.client.generate_image(
-                    prompt, size="1280x720", image=ref_urls, max_retries=12
+                    prompt, size=self._get_image_size(), image=ref_urls, max_retries=12
                 )
             else:
-                image_data = await self.client.generate_image(prompt, size="1280x720", max_retries=12)
+                image_data = await self.client.generate_image(prompt, size=self._get_image_size(), max_retries=12)
             frame_dir = self._get_episode_frames_dir()
             frame_path = frame_dir / f"frame_{storyboard.scene_number:03d}.png"
             with open(frame_path, "wb") as file:
@@ -3942,7 +3952,7 @@ class AnimationProducer:
                         duration=int(sb.duration),
                         first_frame=first_frame,
                         mode=mode,
-                        size="720P",
+                        size=self._get_video_size(),
                         progress_callback=lambda msg: self._log(f"分镜 {scene_index} {msg}"),
                         audios=audios if audios else None,
                         extra_images=reference_images[1:]
@@ -3956,7 +3966,7 @@ class AnimationProducer:
                         duration=int(sb.duration),
                         first_frame=first_frame,
                         mode=mode,
-                        size="720P",
+                        size=self._get_video_size(),
                         progress_callback=lambda msg: self._log(f"分镜 {scene_index} {msg}"),
                         audios=None
                     )
@@ -3973,7 +3983,7 @@ class AnimationProducer:
                         duration=int(sb.duration),
                         first_frame=first_frame,
                         mode=mode,
-                        size="720P",
+                        size=self._get_video_size(),
                         progress_callback=lambda msg: self._log(f"分镜 {scene_index} {msg}"),
                         audios=audios,
                         extra_images=reference_images[1:]
@@ -3987,7 +3997,7 @@ class AnimationProducer:
                         duration=int(sb.duration),
                         first_frame=first_frame,
                         mode=mode,
-                        size="720P",
+                        size=self._get_video_size(),
                         progress_callback=lambda msg: self._log(f"分镜 {scene_index} {msg}"),
                         audios=None
                     )
@@ -4064,7 +4074,7 @@ class AnimationProducer:
             "failed_indices": failed_indices
         }
     
-    async def merge_videos(self, progress_callback: Callable = None) -> Optional[str]:
+    async def merge_videos(self, progress_callback: Callable = None, selected_video_paths: list = None) -> Optional[str]:
         """合并所有分镜视频"""
         import sys
         print("\n" + "="*60, file=sys.stderr)
@@ -4074,12 +4084,14 @@ class AnimationProducer:
         self._log("开始合并视频...")
         self.last_error = ""  # 供 GUI 显示具体失败原因
         
-        # 打印 storyboard 信息
-        print(f"📋 storyboard 数量: {len(self.project.storyboard)}", file=sys.stderr)
-        for i, sb in enumerate(self.project.storyboard):
-            print(f"   [{i}] name={sb.scene_name}, video_path={sb.video_path}", file=sys.stderr)
+        # 如果指定了 selected_video_paths，使用这些路径
+        if selected_video_paths:
+            video_paths = selected_video_paths
+            self._log(f"📋 选择性合并：从 {len(selected_video_paths)} 个选中项中合并视频")
+        else:
+            # 否则合并所有视频
+            video_paths = [sb.video_path for sb in self.project.storyboard if sb.video_path]
         
-        video_paths = [sb.video_path for sb in self.project.storyboard if sb.video_path]
         if not video_paths:
             self.last_error = "没有可合并的视频（分镜列表里没有已生成的视频）"
             self._log("❌ 没有可合并的视频（storyboard 中没有 video_path）")
@@ -4131,14 +4143,13 @@ class AnimationProducer:
 
             self._log(f"已创建文件列表: {file_list_path}")
 
-            # 输出路径：剧集模式下按集命名，保存在 videos/ 目录下
-            episodes = getattr(self.project, 'episodes', [])
-            cur_ep = getattr(self.project, 'current_episode', -1)
-            if episodes and len(episodes) > 1 and 0 <= cur_ep < len(episodes):
-                ep_title = (episodes[cur_ep].get("title") or f"第{cur_ep+1}集").strip()
-                final_path = videos_root / f"第{cur_ep+1}集_{ep_title}_final.mp4"
-            else:
-                final_path = videos_root / "final.mp4"
+            # 输出路径：使用"合并视频X"格式命名
+            # 查找 videos 目录下已有的合并文件，确定下一个序号
+            existing_merged = list(videos_root.glob("合并视频*.mp4"))
+            next_num = len(existing_merged) + 1
+            final_path = videos_root / f"合并视频{next_num}.mp4"
+            
+            self._log(f"输出文件: {final_path.name}")
             
             # 使用 ffmpeg 合并
             self._log("开始合并视频...")
@@ -4167,7 +4178,7 @@ class AnimationProducer:
             
             self._log(f"执行命令: {' '.join(cmd)}")
             
-            # 使用 Popen 而不是 run，避免阻塞
+            # 使用 Popen 执行 ffmpeg
             import sys
             if sys.platform == 'win32':
                 # Windows 下隐藏控制台
@@ -4179,17 +4190,13 @@ class AnimationProducer:
                     cmd,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
-                    text=True,
-                    encoding='utf-8',
                     startupinfo=startupinfo
                 )
             else:
                 process = subprocess.Popen(
                     cmd,
                     stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                    encoding='utf-8'
+                    stderr=subprocess.PIPE
                 )
             
             # 等待完成，带超时
@@ -4237,17 +4244,13 @@ class AnimationProducer:
                         cmd_reencode,
                         stdout=subprocess.PIPE,
                         stderr=subprocess.PIPE,
-                        text=True,
-                        encoding='utf-8',
                         startupinfo=startupinfo
                     )
                 else:
                     process = subprocess.Popen(
                         cmd_reencode,
                         stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
-                        text=True,
-                        encoding='utf-8'
+                        stderr=subprocess.PIPE
                     )
                 
                 try:

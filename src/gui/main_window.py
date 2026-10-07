@@ -155,6 +155,8 @@ class MainWindow(QMainWindow):
         self.media_player.setAudioOutput(self.media_audio_output)
         self.media_player.positionChanged.connect(self._on_media_position_changed)
         self.media_player.durationChanged.connect(self._on_media_duration_changed)
+        self.media_player.errorOccurred.connect(self._on_media_error)
+        self.media_player.playbackStateChanged.connect(self._on_media_playback_state_changed)
 
         # 中间：工作区（堆叠窗口，根据左侧选择切换）
         work_panel = self._create_right_panel()
@@ -452,6 +454,20 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(200, self.media_player.play)
         if kwargs.get('log_prefix'):
             self._log(f"{kwargs['log_prefix']} 播放视频: {Path(video_path).name}")
+    
+    def _on_media_error(self, error):
+        """媒体播放器错误处理"""
+        self._log(f"⚠️ 媒体播放错误: {error}")
+        self.media_play_btn.setText("▶ 播放")
+    
+    def _on_media_playback_state_changed(self, state):
+        """媒体播放器状态变化"""
+        if state == QMediaPlayer.PlaybackState.StoppedState:
+            self.media_play_btn.setText("▶ 播放")
+        elif state == QMediaPlayer.PlaybackState.PlayingState:
+            self.media_play_btn.setText("⏸ 暂停")
+        elif state == QMediaPlayer.PlaybackState.PausedState:
+            self.media_play_btn.setText("▶ 播放")
     
     def _on_media_position_changed(self, position: int):
         """媒体播放位置变化"""
@@ -818,7 +834,8 @@ class MainWindow(QMainWindow):
     
     def _create_video_tab(self) -> QWidget:
         page = VideoPage(self)
-        self.video_list = page.video_list
+        self.video_page = page
+        self.video_table = page.video_table
         self.video_stats_label = page.video_stats_label
         return page
     
@@ -826,29 +843,63 @@ class MainWindow(QMainWindow):
         """刷新视频列表"""
         self._ensure_media_registered()
         if not self.project:
-            self.video_list.clear()
+            self.video_table.setRowCount(0)
             self.video_stats_label.setText("视频总数: 0")
             return
         
-        self.video_list.clear()
+        self.video_table.setRowCount(0)
+        
+        # 收集所有视频文件
+        video_items = []
         
         # 添加总视频（如果存在）
         if self.project.video_path and Path(self.project.video_path).exists():
-            item = QListWidgetItem("🎬 总视频（合并后）")
-            item.setData(Qt.ItemDataRole.UserRole, {"type": "final", "path": self.project.video_path})
-            self.video_list.addItem(item)
+            video_items.append({
+                "type": "final",
+                "name": "🎬 总视频（合并后）",
+                "path": self.project.video_path,
+                "index": -1
+            })
         
         # 添加分镜视频
         for i, sb in enumerate(self.project.storyboard):
             if sb.video_path and Path(sb.video_path).exists():
-                item = QListWidgetItem(f"🎞️ 分镜 {sb.scene_number}: {sb.scene or sb.scene_name}")
-                item.setData(Qt.ItemDataRole.UserRole, {"type": "scene", "index": i, "path": sb.video_path})
-                self.video_list.addItem(item)
+                video_items.append({
+                    "type": "scene",
+                    "name": f"分镜 {sb.scene_number}: {sb.scene or sb.scene_name}",
+                    "path": sb.video_path,
+                    "index": i
+                })
         
-        # 默认选中第一个视频
-        if self.video_list.count() > 0:
-            self.video_list.setCurrentRow(0)
-        self.video_stats_label.setText(f"视频总数: {self.video_list.count()}")
+        # 填充表格
+        self.video_table.setRowCount(len(video_items))
+        for row, item_info in enumerate(video_items):
+            # 第0列：勾选框（使用 QCheckBox cellWidget，与分镜页一致）
+            select_cb = QCheckBox()
+            select_cb.setChecked(True)
+            cb_wrap = QWidget()
+            cb_lay = QHBoxLayout(cb_wrap)
+            cb_lay.setContentsMargins(2, 2, 2, 2)
+            cb_lay.addStretch()
+            cb_lay.addWidget(select_cb)
+            cb_lay.addStretch()
+            self.video_table.setCellWidget(row, 0, cb_wrap)
+            
+            # 序号列
+            seq_item = QTableWidgetItem(str(row + 1))
+            seq_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.video_table.setItem(row, 1, seq_item)
+            
+            # 视频名称列
+            name_item = QTableWidgetItem(item_info["name"])
+            self.video_table.setItem(row, 2, name_item)
+            
+            # 文件路径列 - 显示完整路径，存入 UserRole 作为备用
+            path_item = QTableWidgetItem(item_info["path"])
+            path_item.setData(Qt.ItemDataRole.UserRole, item_info["path"])
+            self.video_table.setItem(row, 3, path_item)
+        
+        self.video_stats_label.setText(f"视频总数: {len(video_items)}")
     
     def _on_import_video(self):
         """导入视频文件"""
@@ -902,9 +953,16 @@ class MainWindow(QMainWindow):
                 else:
                     self.show_media_video(video_path, video_path)
     
-    def _on_video_double_clicked(self, item):
-        """双击视频项时自动播放"""
-        self._media_play()
+    def _on_video_double_clicked(self, row, col):
+        """双击视频表格时自动播放"""
+        path_item = self.video_table.item(row, 3)
+        if path_item:
+            video_path = path_item.data(Qt.ItemDataRole.UserRole) or path_item.text()
+            if video_path and Path(video_path).exists():
+                if hasattr(self, 'show_media_video'):
+                    name_item = self.video_table.item(row, 2)
+                    video_name = name_item.text() if name_item else video_path
+                    self.show_media_video(video_path, video_name)
     
     def _create_log_panel(self) -> QWidget:
         self._log_panel = LogPanel()
@@ -1512,6 +1570,13 @@ class MainWindow(QMainWindow):
             index = self.story_length_combo.findText(length_text)
             if index >= 0:
                 self.story_length_combo.setCurrentIndex(index)
+        
+        # 恢复视频方向UI状态
+        if hasattr(self, 'orientation_combo'):
+            orientation = getattr(self.project, 'video_orientation', 'landscape')
+            self.orientation_combo.blockSignals(True)
+            self.orientation_combo.setCurrentIndex(1 if orientation == "portrait" else 0)
+            self.orientation_combo.blockSignals(False)
         
         # 角色/道具/场景列表：统一使用带去重的刷新方法（数据源为 project.characters/props/scenes）
         self._refresh_character_list()
@@ -5448,6 +5513,8 @@ class MainWindow(QMainWindow):
                         merge=False
                     )
                     self._log(f"✅ 已添加角色到资产库: {character.name}")
+                    # 同时添加到项目内存列表，使角色列表刷新后能显示
+                    self.project.characters.append(character)
                 else:
                     self.project.characters.append(character)
                     self._log(f"⚠️ 资产库为空，角色仅添加到项目内存: {character.name}")
@@ -7600,6 +7667,63 @@ class MainWindow(QMainWindow):
             self._log(f"✅ 已删除 {count} 个分镜的视频文件")
             self._refresh_storyboard_table()
             self.project_manager.save_project(self.project)
+    
+    def _on_delete_selected_videos(self):
+        """删除视频页已勾选的视频文件"""
+        if not self.project:
+            QMessageBox.warning(self, "警告", "请先创建或打开项目")
+            return
+        
+        # 获取勾选的视频路径（使用 cellWidget 中的 QCheckBox）
+        selected_video_paths = []
+        if hasattr(self, 'video_page') and hasattr(self.video_page, 'video_table'):
+            table = self.video_page.video_table
+            for row in range(table.rowCount()):
+                widget = table.cellWidget(row, 0)
+                if widget:
+                    cb = widget.findChild(QCheckBox)
+                    if cb and cb.isChecked():
+                        path_item = table.item(row, 3)
+                        if path_item:
+                            video_path = path_item.data(Qt.ItemDataRole.UserRole) or path_item.text()
+                            if video_path:
+                                selected_video_paths.append(video_path)
+        
+        if not selected_video_paths:
+            QMessageBox.warning(self, "提示", "请先勾选要删除的视频")
+            return
+        
+        # 确认删除
+        reply = QMessageBox.question(
+            self, "确认删除",
+            f"确定要删除选中的 {len(selected_video_paths)} 个视频文件吗？\n此操作不可恢复！",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        
+        # 删除文件
+        count = 0
+        for video_path in selected_video_paths:
+            if Path(video_path).exists():
+                try:
+                    Path(video_path).unlink()
+                    count += 1
+                    self._log(f"🗑️ 已删除: {Path(video_path).name}")
+                except Exception as e:
+                    self._log(f"⚠️ 删除视频失败 {video_path}: {e}")
+            # 同步清除分镜中的 video_path 引用
+            if self.project:
+                for sb in self.project.storyboard:
+                    if getattr(sb, 'video_path', None) == video_path:
+                        sb.video_path = None
+        
+        if count > 0:
+            self._log(f"✅ 已删除 {count} 个视频文件")
+            if self.project and self.project_manager:
+                self.project_manager.save_project(self.project)
+            # 刷新视频列表
+            self._refresh_video_list()
 
     def _on_storyboard_cell_edit(self, row: int, col: int):
         """编辑分镜单元格"""
@@ -8377,32 +8501,50 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "安装失败", "FFmpeg 安装失败，无法执行「%s」。" % context)
 
     def _on_merge_video(self):
-        """合并视频"""
+        """合并视频 - 从视频页的勾选状态获取要合并的视频"""
         if not self.project:
             QMessageBox.warning(self, "警告", "请先创建或打开项目")
             return
         
-        # 检查是否有视频文件
-        video_count = sum(1 for sb in self.project.storyboard if sb.video_path)
-        if video_count == 0:
-            QMessageBox.warning(self, "警告", "没有可合并的视频，请先生成视频")
+        # 从视频页的表格获取勾选的视频（使用 cellWidget 中的 QCheckBox）
+        selected_video_paths = []
+        if hasattr(self, 'video_page') and hasattr(self.video_page, 'video_table'):
+            table = self.video_page.video_table
+            for row in range(table.rowCount()):
+                widget = table.cellWidget(row, 0)
+                if widget:
+                    cb = widget.findChild(QCheckBox)
+                    if cb and cb.isChecked():
+                        path_item = table.item(row, 3)
+                        if path_item:
+                            video_path = path_item.data(Qt.ItemDataRole.UserRole) or path_item.text()
+                            if video_path:
+                                selected_video_paths.append(video_path)
+        
+        if not selected_video_paths:
+            QMessageBox.warning(self, "警告", "没有可合并的视频，请在视频列表中勾选要合并的视频")
             return
 
-        # 合并视频需要 FFmpeg：缺失时 Offer 一键安装
+        # 合并视频需要 FFmpeg
         if not self._ensure_ffmpeg("合并视频", retry=lambda: self._on_merge_video()):
             return
-
         
-        # 使用 ProductionWorker 异步合并
-        self._worker = ProductionWorker(self.producer, step='merge_video')
+        # 使用 ProductionWorker 异步合并，传递选中的视频路径
+        self._worker = ProductionWorker(self.producer, step='merge_video', selected_video_paths=selected_video_paths)
         self._start_worker(self._worker, self._on_merge_video_finished)
         
-        self._log(f"开始合并 {video_count} 个视频...")
+        self._log(f"开始合并 {len(selected_video_paths)} 个视频...")
     
     def _on_agnes_mode_changed(self, mode):
         """AGNES 视频生成模式改变"""
         Settings.AGNES_VIDEO_MODE = mode
         Settings.save_user_config()
+    
+    def _on_video_orientation_changed(self, index):
+        """视频画面方向改变"""
+        if self.project:
+            self.project.video_orientation = "portrait" if index == 1 else "landscape"
+            self._log(f"📐 视频方向已切换: {'竖屏 720x1280' if index == 1 else '横屏 1280x720'}")
 
     def _on_production_progress(self, message: str, current: int, total: int):
         """制作进度"""

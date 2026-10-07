@@ -59,6 +59,17 @@ class StoryboardPage(QWidget):
         )
         self.mode_combo.currentTextChanged.connect(controller._on_agnes_mode_changed)
         params_layout.addRow("生成模式:", self.mode_combo)
+        # 视频方向选择
+        self.orientation_combo = QComboBox()
+        self.orientation_combo.addItems(["🖥️ 横屏 1280x720", "📱 竖屏 720x1280"])
+        self.orientation_combo.setCurrentIndex(0)
+        self.orientation_combo.setToolTip(
+            "视频画面方向：\n"
+            "横屏 1280x720 - 适合电脑/电视观看\n"
+            "竖屏 720x1280 - 适合手机短视频平台（抖音/快手等）"
+        )
+        self.orientation_combo.currentIndexChanged.connect(controller._on_video_orientation_changed)
+        params_layout.addRow("画面方向:", self.orientation_combo)
         params_group.setLayout(params_layout)
         left_layout.addWidget(params_group)
 

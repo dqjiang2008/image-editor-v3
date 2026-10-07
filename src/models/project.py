@@ -347,6 +347,8 @@ class Project:
     video_mode: str = ""
     # 高级用户手动注入的风格短语（分镜页高级选项，追加到帧图/视频 prompt 末尾）
     custom_style_suffix: str = ""
+    # 视频方向配置：landscape(横屏1280x720) / portrait(竖屏720x1280)
+    video_orientation: str = "landscape"
     # 已解析过的剧本文件路径列表（防止重复解析产生相同资产）
     parsed_files: List[str] = field(default_factory=list)
     created_at: str = ""

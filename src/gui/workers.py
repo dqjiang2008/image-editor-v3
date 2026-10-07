@@ -143,7 +143,10 @@ class ProductionWorker(QThread):
                         }
                     })
                 elif step == 'merge_video':
-                    result = await self.producer.merge_videos()
+                    selected_video_paths = kwargs.pop('selected_video_paths', None)
+                    result = await self.producer.merge_videos(
+                        selected_video_paths=selected_video_paths
+                    )
                     self.finished.emit({'video': result})
                 elif step == 'analyze_story':
                     story = kwargs.pop('story', '')

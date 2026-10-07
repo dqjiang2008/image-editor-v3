@@ -68,3 +68,17 @@ RELEASE_TEMPLATE.md
 SCREENSHOTS.md
 push_to_github.bat
 verify_push.ps1
+
+# 视频文件（不提交到仓库）
+*.mp4
+*.avi
+*.mkv
+*.mov
+*.wmv
+
+# 临时文档和脚本
+GITEE_SYNC.md
+PROMOTION.md
+cleanup_git_history.bat
+push_to_gitee.bat
+_last_prompt.txt
