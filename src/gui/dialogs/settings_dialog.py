@@ -25,7 +25,7 @@ class SettingsDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("⚙️ 设置")
-        self.setMinimumSize(500, 400)
+        self.setMinimumSize(560, 620)
         self._setup_ui()
         self._load_settings()
 
@@ -70,6 +70,31 @@ class SettingsDialog(QDialog):
 
         api_group.setLayout(api_layout)
         layout.addWidget(api_group)
+
+        # 可选的 OpenAI 文本处理配置。仅填写 API Key 时启用，留空自动回退到 Agnes。
+        text_group = QGroupBox("文本处理")
+        text_layout = QFormLayout()
+        text_layout.setSpacing(12)
+
+        self.openai_key_input = QLineEdit()
+        self.openai_key_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self.openai_key_input.setPlaceholderText("可选，留空则使用 Agnes 文本模型")
+        text_layout.addRow("OpenAI API Key:", self.openai_key_input)
+
+        self.openai_url_input = QLineEdit()
+        self.openai_url_input.setPlaceholderText("https://api.openai.com")
+        text_layout.addRow("API 基础 URL:", self.openai_url_input)
+
+        self.openai_model_input = QLineEdit()
+        self.openai_model_input.setPlaceholderText("例如 gpt-4o-mini")
+        text_layout.addRow("文本模型:", self.openai_model_input)
+
+        text_hint = QLabel("填写并保存后，故事、资产提取、分镜脚本和对话等文本处理会统一使用 OpenAI 兼容接口；未填写则继续使用 Agnes。")
+        text_hint.setWordWrap(True)
+        text_hint.setStyleSheet("color: #64748b; font-size: 11px;")
+        text_layout.addRow("", text_hint)
+        text_group.setLayout(text_layout)
+        layout.addWidget(text_group)
 
         # AGNES 调试模式
         debug_group = QGroupBox("🐛 AGNES 调试模式")
@@ -165,6 +190,9 @@ class SettingsDialog(QDialog):
         """加载设置"""
         self.api_key_input.setText(Settings.API_KEY)
         self.api_url_input.setText(Settings.API_BASE_URL)
+        self.openai_key_input.setText(Settings.OPENAI_API_KEY)
+        self.openai_url_input.setText(Settings.OPENAI_BASE_URL)
+        self.openai_model_input.setText(Settings.OPENAI_TEXT_MODEL)
         self.text_model_input.setCurrentText(Settings.TEXT_MODEL)
         self.image_model_input.setCurrentText(Settings.IMAGE_MODEL)
         self.video_model_input.setCurrentText(Settings.VIDEO_MODEL)
@@ -174,6 +202,9 @@ class SettingsDialog(QDialog):
         """保存设置"""
         Settings.API_KEY = self.api_key_input.text()
         Settings.API_BASE_URL = self.api_url_input.text()
+        Settings.OPENAI_API_KEY = self.openai_key_input.text().strip()
+        Settings.OPENAI_BASE_URL = self.openai_url_input.text().strip() or "https://api.openai.com"
+        Settings.OPENAI_TEXT_MODEL = self.openai_model_input.text().strip() or "gpt-4o-mini"
         Settings.TEXT_MODEL = self.text_model_input.currentText()
         Settings.IMAGE_MODEL = self.image_model_input.currentText()
         Settings.VIDEO_MODEL = self.video_model_input.currentText()

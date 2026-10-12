@@ -64,7 +64,8 @@ def json_loads_lenient(text: str, _depth: int = 0):
     典型故障：description 字段中文文本里混进裸 " 或未转义控制字符，
     标准 json.loads 报 "Expecting ',' delimiter"。
     修复策略（渐进）：直接解析 → 补全裸反斜杠 → 修复值内裸引号 →
-    截断补全括号 → 逐对象提取。任何一步成功且解析出 list 即返回，
+    截断补全括号 → 逐对象提取，并兼容 Markdown、包装对象和双重编码字符串。
+    任何一步成功且解析出 list 即返回，
     全部失败返回 None。
 
     参数 _depth: 递归深度计数器，防止无限递归。
@@ -74,16 +75,51 @@ def json_loads_lenient(text: str, _depth: int = 0):
     if _depth > 3:
         return None
 
+    def _as_collection(value):
+        """把模型常见的数组包装对象统一转换成列表。"""
+        if isinstance(value, list):
+            return value
+        if not isinstance(value, dict):
+            return None
+        preferred = (
+            "characters", "character", "角色", "scenes", "scene", "场景",
+            "props", "prop", "道具", "items", "results", "data", "list",
+        )
+        for key in preferred:
+            nested = value.get(key)
+            if isinstance(nested, list):
+                return nested
+        for nested in value.values():
+            if isinstance(nested, list):
+                return nested
+        if "name" in value or "名称" in value:
+            return [value]
+        return None
+
     def _try(s: str):
         try:
             v = json.loads(s, strict=False)
-            return v if isinstance(v, list) else None
+            if isinstance(v, str) and v != s and _depth < 3:
+                return _try(v)
+            return _as_collection(v)
         except (json.JSONDecodeError, ValueError):
             return None
 
     v = _try(text)
     if v is not None:
         return v
+
+    cleaned = re.sub(r"^\s*```(?:json)?\s*", "", text, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s*```\s*$", "", cleaned).strip()
+    if cleaned != text:
+        v = _try(cleaned)
+        if v is not None:
+            return v
+
+    for candidate in _extract_json_values(cleaned):
+        v = _try(candidate)
+        if v is not None:
+            return v
 
     # 修复裸反斜杠：\ 后跟非法转义字符时补全为 \\
     fixed = re.sub(r'\\(?!["\\/bfnrtu])', r"\\\\", text)
@@ -110,12 +146,48 @@ def json_loads_lenient(text: str, _depth: int = 0):
         seen = set()
         uniq = []
         for it in items:
-            key = (it.get("name", ""), it.get("description", ""))
+            if not isinstance(it, dict):
+                continue
+            key = (it.get("name", it.get("名称", "")), it.get("description", it.get("描述", "")))
             if key not in seen:
                 seen.add(key)
                 uniq.append(it)
         return uniq
     return None
+
+
+def _extract_json_values(text: str) -> List[str]:
+    """提取文本中完整的顶层 JSON 数组或对象，兼容前后自然语言。"""
+    values = []
+    for start, opening in enumerate(text):
+        if opening not in "[{":
+            continue
+        stack = []
+        in_string = False
+        escaped = False
+        for idx in range(start, len(text)):
+            ch = text[idx]
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif ch == "\\":
+                    escaped = True
+                elif ch == '"':
+                    in_string = False
+                continue
+            if ch == '"':
+                in_string = True
+            elif ch in "[{":
+                stack.append(ch)
+            elif ch in "]}":
+                if not stack or (ch == "]" and stack[-1] != "[") or (ch == "}" and stack[-1] != "{"):
+                    break
+                stack.pop()
+                if not stack:
+                    values.append(text[start:idx + 1])
+                    break
+    return values
+
 
 def _complete_truncated(s: str) -> str:
     """输出被 max_tokens 截断时：截到最后一个完整对象，补全缺失的引号/括号。"""
@@ -292,6 +364,7 @@ class AgnesAIClient:
         self.base_url = base_url or Settings.API_BASE_URL
         self._session: Optional[aiohttp.ClientSession] = None
         self._session_loop_id: Optional[int] = None
+        self._last_text_finish_reason: Optional[str] = None
         self.log_callback = log_callback or (lambda msg: None)
         self.debug_mode = debug_mode  # 调试模式：不实际发送请求，只保存JSON
         self.debug_dir = debug_dir or "data/debug"  # 调试文件保存目录
@@ -300,6 +373,30 @@ class AgnesAIClient:
         """设置调试模式（用于生成任务开始时显式设置）"""
         self.debug_mode = mode
         print(f"[DEBUG] 调试模式已设置为: {mode}", file=sys.stderr, flush=True)
+
+    @staticmethod
+    def text_api_config():
+        """返回当前文本 API 配置。
+
+        OpenAI 配置是可选的：只有 API Key 非空时才接管文本请求，
+        因此未配置时完全保持 Agnes 的原有行为。
+        """
+        if (Settings.OPENAI_API_KEY or "").strip():
+            base_url = (Settings.OPENAI_BASE_URL or "https://api.openai.com").rstrip("/")
+            if base_url.endswith("/v1"):
+                base_url = base_url[:-3].rstrip("/")
+            return {
+                "api_key": Settings.OPENAI_API_KEY.strip(),
+                "base_url": base_url,
+                "model": (Settings.OPENAI_TEXT_MODEL or "gpt-4o-mini").strip() or "gpt-4o-mini",
+                "provider": "OpenAI",
+            }
+        return {
+            "api_key": "",
+            "base_url": "",
+            "model": Settings.TEXT_MODEL,
+            "provider": "Agnes",
+        }
     
     async def _get_session(self) -> aiohttp.ClientSession:
         try:
@@ -340,7 +437,16 @@ class AgnesAIClient:
         style_guidance: str = "",
     ) -> str:
         """生成故事"""
-        length_map = {"very_short": "3分钟", "short": "5分钟", "medium": "10分钟", "long": "20分钟"}
+        length_map = {
+            "very_short": {"minutes": 3, "max_minutes": 4, "target_chars": 525, "max_chars": 700},
+            "short": {"minutes": 5, "max_minutes": 6, "target_chars": 875, "max_chars": 1050},
+            "medium": {"minutes": 10, "max_minutes": 11, "target_chars": 1750, "max_chars": 1925},
+            "long": {"minutes": 20, "max_minutes": 21, "target_chars": 3500, "max_chars": 3675},
+        }
+        length_spec = length_map.get(length, length_map["medium"])
+        duration = f"{length_spec['minutes']}分钟"
+        max_duration = f"{length_spec['max_minutes']}分钟"
+        max_chars = length_spec["max_chars"]
         age_style_map = {
             "短视频": "节奏明快，内容精炼，适合快速传播",
             "宣传片": "主题突出，视觉冲击力强，具有品牌或活动宣传效果",
@@ -357,15 +463,50 @@ class AgnesAIClient:
 
 要求：
 1. 风格：{age_style_map.get(age_group, "")}
-2. 视频长度：约{length_map.get(length, "20分钟")}的脚本（包含丰富的场景描写和对话）
+2. 视频长度：目标约{duration}，允许自然展开但最多{max_duration}；正文目标约{length_spec['target_chars']}个中文字符，最多{max_chars}个中文字符（不含空白）
 3. 内容积极正面，引人入胜
-4. 包含大量有趣的对话和情节
+4. 用精炼的情节和必要的对话讲完整故事，避免重复描写和无关支线
 5. 结局精彩，令人印象深刻
-6. 内容需要足够长，包含多个场景转换和情节发展，适合制作{length_map.get(length, "20分钟")}视频
+6. 达到目标篇幅后收束情节；最多允许展开到{max_duration}，不要超过上限
 {guidance_block}
 请直接输出内容，不要加标题。"""
 
-        return await self._call_text_api(prompt)
+        story = await self._call_text_api(prompt)
+
+        def count_chars(text):
+            return len(re.sub(r"\s+", "", text or ""))
+
+        # 模型偶尔会无视篇幅要求；超出宽限上限时自动压缩，避免短档位产出长篇正文。
+        for _ in range(3):
+            actual_chars = count_chars(story)
+            if actual_chars <= max_chars:
+                break
+            print(
+                f"[故事生成] 正文 {actual_chars} 字，超过{max_duration}上限 {max_chars} 字，自动压缩重写",
+                file=sys.stderr,
+                flush=True,
+            )
+            compressed_story = await self._call_text_api(
+                f"请将下面的故事压缩并改写为完整结局的短篇，保留主题、主要角色、核心冲突和结尾。"
+                f"正文最多{max_chars}个中文字符（不含空白），目标约{length_spec['target_chars']}字；"
+                f"严禁超过上限。只输出改写后的故事正文。\n\n故事：\n{story}",
+                system_prompt=(
+                    f"你是严格控制篇幅的故事编辑。只输出故事正文，且不超过{max_chars}个中文字符。"
+                    "必须保留完整结局，删除重复描写、支线和冗长对白。"
+                ),
+                max_tokens=min(8000, max(1500, max_chars * 2)),
+            )
+            if count_chars(compressed_story) >= actual_chars:
+                break
+            story = compressed_story
+
+        if count_chars(story) > max_chars:
+            raise ValueError(
+                f"模型连续压缩后仍超过{max_duration}时长上限（{count_chars(story)}/{max_chars}字）；"
+                "请重试或更换文本模型。"
+            )
+
+        return story
     
     async def analyze_story_for_split(
         self,
@@ -1403,6 +1544,7 @@ class AgnesAIClient:
         system_prompt: str = "",
         max_tokens: int = 8000,
         max_retries: int = None,
+        json_mode: bool = False,
     ) -> str:
         """调用文本 API（带网络重试）。
 
@@ -1422,11 +1564,16 @@ class AgnesAIClient:
 
         for attempt in range(retries + 1):
             try:
-                return await self._call_text_api_once(prompt, system_prompt, max_tokens)
+                self._last_text_finish_reason = None
+                return await self._call_text_api_once(prompt, system_prompt, max_tokens, json_mode)
             except RETRYABLE_ERRORS as e:
                 # CancelledError 不是 Exception 子类，若只写 except Exception
                 # 会连带漏掉网络层泄漏的取消异常（新版已并入 RETRYABLE_ERRORS）
                 raise_if_real_cancel(e)
+                error_lower = str(e).lower()
+                if json_mode and ("response_format" in error_lower or "api 错误 (400)" in error_lower):
+                    print("[API] ⚠️ 当前 OpenAI 兼容服务不支持 response_format，改用普通文本模式重试", file=sys.stderr)
+                    return await self._call_text_api_once(prompt, system_prompt, max_tokens, False)
                 last_error = e
                 msg = str(e)
                 # 认证/参数类错误重试无意义
@@ -1452,11 +1599,13 @@ class AgnesAIClient:
         prompt: str,
         system_prompt: str = "",
         max_tokens: int = 8000,
+        json_mode: bool = False,
     ) -> str:
         """调用文本 API（单次尝试，不含重试）"""
         import sys
         
         session = await self._get_session()
+        text_config = self.text_api_config()
         
         messages = []
         if system_prompt:
@@ -1464,22 +1613,25 @@ class AgnesAIClient:
         messages.append({"role": "user", "content": prompt})
         
         data = {
-            "model": Settings.TEXT_MODEL,
+            "model": text_config["model"],
             "messages": messages,
             "temperature": 0.8,
             "max_tokens": max_tokens,
         }
+        if json_mode and text_config["provider"] == "OpenAI":
+            data["response_format"] = {"type": "json_object"}
         
         # 使用标准认证方式（参考旧工程实现）
         headers = {
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.api_key}"
+            "Authorization": f"Bearer {text_config['api_key'] or self.api_key}"
         }
         
-        url = f"{self.base_url}/v1/chat/completions"
+        url = f"{(text_config['base_url'] or self.base_url).rstrip('/')}/v1/chat/completions"
         print(f"\n[API] 调用文本API", file=sys.stderr)
         print(f"[API] URL: {url}", file=sys.stderr)
-        print(f"[API] 模型: {Settings.TEXT_MODEL}", file=sys.stderr)
+        print(f"[API] 提供商: {text_config['provider']}", file=sys.stderr)
+        print(f"[API] 模型: {text_config['model']}", file=sys.stderr)
         print(f"[API] 请求体: {json.dumps(data, ensure_ascii=False)[:200]}...", file=sys.stderr)
         
         try:
@@ -1497,8 +1649,23 @@ class AgnesAIClient:
                     try:
                         result = await response.json()
                         if "choices" in result and len(result["choices"]) > 0:
+                            choice = result["choices"][0]
+                            self._last_text_finish_reason = choice.get("finish_reason")
+                            if self._last_text_finish_reason == "length":
+                                print("[API] ⚠️ 文本模型达到输出 token 上限，响应可能被截断", file=sys.stderr)
                             print(f"[API] ✅ 文本生成成功", file=sys.stderr)
-                            return result["choices"][0]["message"]["content"]
+                            message = choice.get("message") or {}
+                            content = message.get("content")
+                            if isinstance(content, list):
+                                content = "".join(
+                                    item.get("text", "") for item in content
+                                    if isinstance(item, dict) and item.get("type") in ("text", "output_text")
+                                )
+                            if content is None or content == "":
+                                content = message.get("reasoning_content") or ""
+                                if content:
+                                    print("[API] ⚠️ message.content 为空，使用 reasoning_content 作为文本结果", file=sys.stderr)
+                            return content if isinstance(content, str) else str(content or "")
                         print(f"[API] ❌ 响应格式错误: {result}", file=sys.stderr)
                         raise Exception("文本生成失败：响应中没有choices")
                     except json.JSONDecodeError as e:
@@ -1538,6 +1705,59 @@ class AgnesAIClient:
 请直接输出名称，不要加其他内容。"""
         result = await self._call_text_api(prompt)
         return result.replace('\n', '').replace('\r', '').strip()
+
+    async def _parse_extraction_response(self, result: str, prompt: str, label: str) -> List[dict]:
+        """解析角色/道具/场景数组；格式错误时按原始输入重试一次。"""
+        def parse_records(text):
+            records = json_loads_lenient(text or "")
+            if records is None or not isinstance(records, list):
+                return None
+            if not all(isinstance(item, dict) for item in records):
+                return None
+            return records
+
+        records = parse_records(result)
+        if records is not None:
+            return records
+
+        first_finish_reason = self._last_text_finish_reason
+        first_text = result or ""
+        preview = first_text.replace("\r", " ").replace("\n", " ")[:300]
+        tail = first_text.replace("\r", " ").replace("\n", " ")[-300:]
+        print(
+            f"[{label}] 首次响应不是有效JSON数组，自动重试一次。"
+            f"响应长度={len(first_text)}，finish_reason={first_finish_reason!r}，"
+            f"开头={preview!r}，结尾={tail!r}",
+            file=sys.stderr,
+        )
+        strict_prompt = (
+            prompt
+            + '\n\n最终输出规则（优先级最高）：只输出一个合法 JSON 对象，格式为 {"items": [...]}；'
+              "items 数组元素必须是对象；不要 Markdown 代码围栏、不要解释、不要把 JSON 放进字符串。"
+        )
+        retry_result = await self._call_text_api(
+            strict_prompt,
+            system_prompt=(
+                '你是结构化数据抽取器。必须只返回可被标准 json.loads 解析的 JSON 对象，格式为 {"items": [...]}。'
+                "不得输出 Markdown、前言、代码围栏或该对象以外的文字。"
+            ),
+            max_tokens=16000 if label == "场景提取" else 12000,
+            json_mode=True,
+        )
+        records = parse_records(retry_result)
+        if records is not None:
+            print(f"[{label}] ✅ 格式重试成功，提取到 {len(records)} 项", file=sys.stderr)
+            return records
+
+        retry_text = retry_result or ""
+        retry_preview = retry_text.replace("\r", " ").replace("\n", " ")[:300]
+        retry_tail = retry_text.replace("\r", " ").replace("\n", " ")[-300:]
+        raise ValueError(
+            f"{label}响应两次都不是有效JSON数组。首次长度={len(first_text)}，"
+            f"finish_reason={first_finish_reason!r}，开头={preview!r}，结尾={tail!r}；"
+            f"重试长度={len(retry_text)}，finish_reason={self._last_text_finish_reason!r}，"
+            f"开头={retry_preview!r}，结尾={retry_tail!r}"
+        )
     
     async def extract_characters(
         self, story: str, video_context: str = "", max_chars: int = 8000,
@@ -1601,34 +1821,12 @@ JSON 硬性规则（务必遵守）：
 1. 字符串值内部出现的双引号必须转义为 \"（或直接改用中文引号「」），严禁裸双引号
 2. 字符串值内部不得出现未转义的英文单引号以外的控制字符或换行符
 3. 直接输出 JSON 数组，不要加其他内容。确保提取所有角色，不要遗漏！"""
-        result = await self._call_text_api(prompt)
-        import json
-        import re
-        import sys
-        
-        print(f"\n{'='*60}", file=sys.stderr)
-        print(f"[角色提取] AI返回内容长度: {len(result)} 字符", file=sys.stderr)
-        print(f"[角色提取] 返回内容前500字符:", file=sys.stderr)
-        print(result[:500], file=sys.stderr)
-        print(f"{'='*60}", file=sys.stderr)
-        
-        match = re.search(r'\[.*\]', result, re.DOTALL)
-        if match:
-            try:
-                characters = json.loads(match.group(), strict=False)
-                print(f"[角色提取] ✅ JSON解析成功，提取到 {len(characters)} 个角色", file=sys.stderr)
-                return characters
-            except json.JSONDecodeError as e:
-                print(f"[角色提取] ❌ 标准JSON解析失败({e})，尝试宽容解析...", file=sys.stderr)
-        else:
-            print(f"[角色提取] ❌ 未找到 JSON 数组，尝试宽容解析...", file=sys.stderr)
-        # 宽容解析：容忍描述值内的裸引号/未转义反斜杠/输出截断
-        characters = json_loads_lenient(result)
-        if characters:
-            print(f"[角色提取] ✅ 宽容解析成功，提取到 {len(characters)} 个角色", file=sys.stderr)
-            return characters
-        print(f"[角色提取] ❌ 宽容解析也失败，返回0个角色", file=sys.stderr)
-        return []
+        result = await self._call_text_api(
+            prompt,
+            system_prompt='只返回合法 JSON 对象，格式为 {"items": [角色对象, ...]}；不要输出前言、说明或 Markdown 代码块。',
+            json_mode=True,
+        )
+        return await self._parse_extraction_response(result, prompt, "角色提取")
     
     async def extract_props(
         self, story: str, video_context: str = "", max_chars: int = 8000,
@@ -1681,33 +1879,12 @@ JSON 硬性规则（务必遵守）：
 2. 字符串值内部不得出现未转义的控制字符或换行符
 3. 直接输出 JSON 数组，不要加其他内容。确保提取最关键的道具，不要遗漏核心物品！"""
 
-        result = await self._call_text_api(prompt)
-        import json
-        import re
-        import sys
-
-        print(f"\n{'='*60}", file=sys.stderr)
-        print(f"[道具提取] AI返回内容长度: {len(result)} 字符", file=sys.stderr)
-        print(result[:500], file=sys.stderr)
-        print(f"{'='*60}", file=sys.stderr)
-
-        match = re.search(r'\[.*\]', result, re.DOTALL)
-        if match:
-            try:
-                props = json.loads(match.group(), strict=False)
-                print(f"[道具提取] ✅ JSON解析成功，提取到 {len(props)} 个道具", file=sys.stderr)
-                return props
-            except json.JSONDecodeError as e:
-                print(f"[道具提取] ❌ 标准JSON解析失败({e})，尝试宽容解析...", file=sys.stderr)
-        else:
-            print(f"[道具提取] ❌ 未找到 JSON 数组，尝试宽容解析...", file=sys.stderr)
-        # 宽容解析：容忍描述值内的裸引号/未转义反斜杠/输出截断
-        props = json_loads_lenient(result)
-        if props:
-            print(f"[道具提取] ✅ 宽容解析成功，提取到 {len(props)} 个道具", file=sys.stderr)
-            return props
-        print(f"[道具提取] ❌ 宽容解析也失败，返回0个道具", file=sys.stderr)
-        return []
+        result = await self._call_text_api(
+            prompt,
+            system_prompt='只返回合法 JSON 对象，格式为 {"items": [道具对象, ...]}；不要输出前言、说明或 Markdown 代码块。',
+            json_mode=True,
+        )
+        return await self._parse_extraction_response(result, prompt, "道具提取")
 
     async def extract_scenes(
         self, story: str, min_scenes: int = 0, max_scenes: int = 0,
@@ -1765,64 +1942,13 @@ description 字段必须是**详细的环境设定描述**（80-160字），用�
 
 示例（仅供参考风格，不要照抄内容，务必按项目视觉风格调整质感描述）：
 "蟠桃园深处，高大繁茂的蟠桃树枝干虬结，枝头硕大的蟠桃泛着粉金色光泽，地上散落着残核断枝。夕阳余晖穿过枝叶缝隙斜照下来，光影斑驳，远处云海翻腾与天际相接。氛围祥和却暗藏躁动，色彩以金红暖色调为主，具有3D渲染电影质感。"""
-        result = await self._call_text_api(prompt)
-        import json
-        import re
-        import sys
-        
-        print(f"\n{'='*60}", file=sys.stderr)
-        print(f"[场景提取] AI返回内容长度: {len(result)} 字符", file=sys.stderr)
-        print(f"[场景提取] 返回内容前1000字符:", file=sys.stderr)
-        print(result[:1000], file=sys.stderr)
-        print(f"{'='*60}", file=sys.stderr)
-        
-        # 尝试多种方式提取JSON
-        # 方式1：直接尝试解析整个返回内容
-        try:
-            scenes = json.loads(result, strict=False)
-            if isinstance(scenes, list):
-                print(f"[场景提取] ✅ 直接解析成功，提取到 {len(scenes)} 个场景", file=sys.stderr)
-                return scenes
-        except json.JSONDecodeError:
-            pass
-        
-        # 方式2：使用正则表达式提取JSON数组
-        match = re.search(r'\[.*\]', result, re.DOTALL)
-        if match:
-            try:
-                scenes = json.loads(match.group(), strict=False)
-                print(f"[场景提取] ✅ 正则提取后解析成功，提取到 {len(scenes)} 个场景", file=sys.stderr)
-                return scenes
-            except json.JSONDecodeError as e:
-                print(f"[场景提取] ❌ JSON解析失败: {e}", file=sys.stderr)
-                print(f"[场景提取] 正则匹配的内容: {match.group()[:500]}...", file=sys.stderr)
-        else:
-            print(f"[场景提取] ❌ 未找到 JSON 数组（正则匹配失败）", file=sys.stderr)
-        
-        # 方式3：尝试清理常见的格式问题
-        cleaned = result.strip()
-        # 移除可能的markdown代码块标记
-        cleaned = re.sub(r'^```json\s*', '', cleaned, flags=re.MULTILINE)
-        cleaned = re.sub(r'^```\s*', '', cleaned, flags=re.MULTILINE)
-        cleaned = re.sub(r'```$', '', cleaned, flags=re.MULTILINE)
-        cleaned = cleaned.strip()
-        
-        try:
-            scenes = json.loads(cleaned, strict=False)
-            if isinstance(scenes, list):
-                print(f"[场景提取] ✅ 清理markdown后解析成功，提取到 {len(scenes)} 个场景", file=sys.stderr)
-                return scenes
-        except json.JSONDecodeError:
-            pass
-
-        # 方式4：宽容解析（容忍描述值内裸引号/未转义反斜杠/输出截断）
-        scenes = json_loads_lenient(result)
-        if scenes:
-            print(f"[场景提取] ✅ 宽容解析成功，提取到 {len(scenes)} 个场景", file=sys.stderr)
-            return scenes
-
-        print(f"[场景提取] ❌ 所有解析方式均失败，返回0个场景", file=sys.stderr)
-        return []
+        result = await self._call_text_api(
+            prompt,
+            system_prompt='只返回合法 JSON 对象，格式为 {"items": [场景对象, ...]}；不要输出前言、说明或 Markdown 代码块。',
+            max_tokens=min(16000, max(8000, (max_scenes or min_scenes or 10) * 500)),
+            json_mode=True,
+        )
+        return await self._parse_extraction_response(result, prompt, "场景提取")
 
 
 def fetch_available_models(api_key: str = "", api_base_url: str = "") -> dict:

@@ -38,10 +38,9 @@ class StoryPage(QWidget):
             ["超短 (3分钟)", "短 (5分钟)", "中 (10分钟)", "长 (20分钟)"]
         )
         self.story_length_combo.setToolTip(
-            "视频长度参考上限\n"
-            "AI 会根据故事内容自行决定分镜数量和时长，\n"
-            "此选项作为上限参考，避免生成过长视频。\n"
-            "处理故事后会自动更新为实际时长档位。"
+            "视频长度目标及上限\n"
+            "AI 会根据故事内容决定分镜数量和实际时长，\n"
+            "最多允许比所选长度多 1 分钟。"
         )
         theme_layout.addRow("长度:", self.story_length_combo)
         theme_group.setLayout(theme_layout)

@@ -16,8 +16,12 @@ from src.services import asset_matcher as _am
 from src.models.project import Project, Character, Scene, Storyboard, Prop
 from src.core import skills as _skills
 
-# 故事长度档位 → 每集目标视频时长（秒）
+# 故事长度档位 → 目标视频时长（秒）
 LENGTH_DURATION_MAP = {"very_short": 180, "short": 300, "medium": 600, "long": 1200}
+# 允许模型在目标时长基础上自然展开的硬上限（每档最多多 1 分钟）。
+LENGTH_MAX_DURATION_MAP = {
+    key: value + 60 for key, value in LENGTH_DURATION_MAP.items()
+}
 
 # 每个分镜描述末尾的全局媒体约束说明（随描述进入视频/图像生成 prompt）
 DESCRIPTION_MEDIA_SUFFIX = (
@@ -163,12 +167,10 @@ _SINGLE_PERSON_PHRASE_PATTERNS = [
 
 
 def _estimate_target_duration_from_story(story: str, length: str = None) -> tuple:
-    """根据故事文本内容量智能推断目标时长和分镜数。
+    """根据文本估算时长，并将用户所选档位加 1 分钟作为硬上限。
 
-    策略：
-    1. 以用户选择的长度档位为基准（尊重用户意图）
-    2. 根据故事字数修正：字数越多，时长越长（不低于档位下限）
-    3. 返回 (target_seconds, target_shot_count, adjusted_length)
+    中文视频脚本按约每分钟175字估算；过短文本按字数估算，过长文本最多
+    比所选档位多 1 分钟，避免长文本把 3 分钟项目推成十几分钟。
 
     经验值（中文视频脚本）：
     - 每 150-200 字约 1 分钟视频内容
@@ -176,22 +178,18 @@ def _estimate_target_duration_from_story(story: str, length: str = None) -> tupl
     """
     char_count = len(story.strip())
     base_seconds = LENGTH_DURATION_MAP.get(length, 600) if length else 600
-    base_shot_count = Settings.LENGTH_SCENE_COUNT.get(length, 50) if length else 50
+    max_seconds = LENGTH_MAX_DURATION_MAP.get(length, base_seconds + 60) if length else 660
+    estimated_seconds = max(60, char_count / 175 * 60)
+    target_seconds = min(estimated_seconds, max_seconds)
 
-    minutes_by_chars = max(1, char_count / 175)
-    seconds_by_chars = minutes_by_chars * 60
-
-    target_seconds = max(base_seconds, seconds_by_chars)
-    target_seconds = min(target_seconds, 2400)
-
-    target_shot_count = max(base_shot_count, int(target_seconds / 7))
+    target_shot_count = max(1, int(round(target_seconds / 7)))
     target_shot_count = min(target_shot_count, 200)
 
-    if target_seconds <= 240:
+    if target_seconds <= LENGTH_MAX_DURATION_MAP["very_short"]:
         adjusted_length = "very_short"
-    elif target_seconds <= 420:
+    elif target_seconds <= LENGTH_MAX_DURATION_MAP["short"]:
         adjusted_length = "short"
-    elif target_seconds <= 900:
+    elif target_seconds <= LENGTH_MAX_DURATION_MAP["medium"]:
         adjusted_length = "medium"
     else:
         adjusted_length = "long"
@@ -199,13 +197,54 @@ def _estimate_target_duration_from_story(story: str, length: str = None) -> tupl
     return int(target_seconds), target_shot_count, adjusted_length
 
 
+def _cap_storyboard_item_durations(storyboard_items: list, max_seconds: float) -> float:
+    """将分镜时长限制在总时长上限内，同时遵守视频模型的单镜最短时长。"""
+    if not storyboard_items:
+        return 0.0
+
+    def get_duration(item):
+        value = item.get("duration", Settings.DEFAULT_DURATION) if isinstance(item, dict) else getattr(
+            item, "duration", Settings.DEFAULT_DURATION
+        )
+        return Settings.normalize_video_duration(value)
+
+    def set_duration(item, duration):
+        if isinstance(item, dict):
+            item["duration"] = duration
+        else:
+            item.duration = duration
+
+    min_duration = float(Settings.VIDEO_MIN_DURATION)
+    durations = [get_duration(item) for item in storyboard_items]
+    minimum_total = min_duration * len(durations)
+    if minimum_total > max_seconds:
+        raise ValueError(
+            f"模型生成了{len(durations)}个分镜，按每镜最短{min_duration:g}秒计算至少需要"
+            f"{minimum_total:g}秒，超过所选时长上限{max_seconds / 60:g}分钟；请减少分镜数后重试。"
+        )
+
+    total = sum(durations)
+    if total <= max_seconds:
+        for item, duration in zip(storyboard_items, durations):
+            set_duration(item, duration)
+        return total
+
+    flexible_total = sum(duration - min_duration for duration in durations)
+    flexible_limit = max_seconds - minimum_total
+    scale = flexible_limit / flexible_total if flexible_total > 0 else 0.0
+    capped = [min_duration + (duration - min_duration) * scale for duration in durations]
+    for item, duration in zip(storyboard_items, capped):
+        set_duration(item, duration)
+    return sum(capped)
+
+
 def _infer_length_from_duration(total_seconds: float) -> str:
     """根据实际总时长反推最接近的长度档位"""
-    if total_seconds <= 240:
+    if total_seconds <= LENGTH_MAX_DURATION_MAP["very_short"]:
         return "very_short"
-    elif total_seconds <= 420:
+    elif total_seconds <= LENGTH_MAX_DURATION_MAP["short"]:
         return "short"
-    elif total_seconds <= 900:
+    elif total_seconds <= LENGTH_MAX_DURATION_MAP["medium"]:
         return "medium"
     else:
         return "long"
@@ -2116,8 +2155,18 @@ class AnimationProducer:
             auto_count=True,
             progress_callback=_batch_progress,
         )
+
+        user_length = length or self.project.length or "medium"
+        max_allowed_duration = LENGTH_MAX_DURATION_MAP.get(
+            user_length, LENGTH_MAX_DURATION_MAP["medium"]
+        )
         
-        total_ai_duration = sum(sb_data.get("duration", 5) for sb_data in storyboard_data)
+        total_ai_duration = sum(
+            Settings.normalize_video_duration(
+                sb_data.get("duration", Settings.DEFAULT_DURATION)
+            )
+            for sb_data in storyboard_data
+        )
         actual_sb_count = len(storyboard_data)
         self._log(f"AI生成: {actual_sb_count} 个分镜, 总时长 {total_ai_duration:.1f}秒 ({total_ai_duration/60:.1f}分钟)")
 
@@ -2128,17 +2177,40 @@ class AnimationProducer:
             )
         
         if total_ai_duration > target_duration * 1.2:
-            self._log(f"⚠️ AI生成的时长超出上限20%，将按比例缩放分镜时长")
+            self._log(f"⚠️ AI生成的时长超出目标20%，将按比例缩放分镜时长")
             scale_factor = target_duration / total_ai_duration
             for sb_data in storyboard_data:
                 original_duration = sb_data.get("duration", 5)
                 sb_data["duration"] = max(4.0, original_duration * scale_factor)
-            total_ai_duration = sum(sb_data.get("duration", 5) for sb_data in storyboard_data)
+            total_ai_duration = sum(
+                Settings.normalize_video_duration(
+                    sb_data.get("duration", Settings.DEFAULT_DURATION)
+                )
+                for sb_data in storyboard_data
+            )
             self._log(f"✅ 缩放后分镜总时长: {total_ai_duration:.1f}秒 ({total_ai_duration/60:.1f}分钟)")
+
+        duration_before_cap = sum(
+            Settings.normalize_video_duration(
+                sb_data.get("duration", Settings.DEFAULT_DURATION)
+            )
+            for sb_data in storyboard_data
+        )
+        total_ai_duration = _cap_storyboard_item_durations(
+            storyboard_data, max_allowed_duration
+        )
+        if total_ai_duration < duration_before_cap:
+            self._log(
+                f"AI分镜时长超过所选档位+1分钟硬上限({max_allowed_duration}秒)，"
+                "或含有超出视频模型范围的单镜时长，已重新分配"
+            )
+            self._log(
+                f"✅ 分镜时长已限制为 {total_ai_duration:.1f}秒 "
+                f"({total_ai_duration / 60:.1f}分钟)"
+            )
 
         # 根据实际分镜数和时长推断档位，仅作日志提示，不覆盖用户选择
         actual_length = _infer_length_from_duration(total_ai_duration)
-        user_length = length or self.project.length or "medium"
         if actual_length != user_length:
             self._log(f"ℹ️ AI实际生成时长 {total_ai_duration:.0f}秒 对应档位 {actual_length}，用户选择档位 {user_length}，保留用户选择")
         
@@ -3795,6 +3867,24 @@ class AnimationProducer:
             )
         if not storyboard_data:
             raise ValueError(f"分镜脚本生成结果为空（当前场景数: {scene_count}）")
+
+        max_allowed_duration = LENGTH_MAX_DURATION_MAP.get(
+            self.project.length or "medium", LENGTH_MAX_DURATION_MAP["medium"]
+        )
+        uncapped_duration = sum(
+            Settings.normalize_video_duration(
+                item.get("duration", Settings.DEFAULT_DURATION)
+            )
+            for item in storyboard_data
+        )
+        capped_duration = _cap_storyboard_item_durations(
+            storyboard_data, max_allowed_duration
+        )
+        if capped_duration < uncapped_duration:
+            self._log(
+                f"AI分镜原时长 {uncapped_duration:.1f}秒超过所选档位+1分钟上限，"
+                f"已限制为 {capped_duration:.1f}秒"
+            )
         self.project.storyboard.clear()
         for index, sb_data in enumerate(storyboard_data, start=1):
             dialogue_role_name = sb_data.get("dialogue_role", "")

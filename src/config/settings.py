@@ -27,6 +27,12 @@ class Settings:
     # API 配置
     API_BASE_URL = "https://apihub.agnes-ai.com"
     API_KEY = os.getenv("AGNES_API_KEY", "")  # 优先从环境变量读取，默认空，用户通过设置页面输入
+
+    # 文本处理 API（可选）。填写 OpenAI API Key 后，所有文本生成/解析请求优先走此配置；
+    # 留空时继续使用上面的 Agnes 文本模型。
+    OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+    OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com")
+    OPENAI_TEXT_MODEL = os.getenv("OPENAI_TEXT_MODEL", "gpt-4o-mini")
     
     # 模型配置（参考旧工程正确名称）
     TEXT_MODEL = "agnes-2.5-flash"
@@ -136,6 +142,9 @@ class Settings:
                 cls.LAST_PROJECT_NAME = config.get('last_project_name', '')
                 cls.API_KEY = config.get('api_key', cls.API_KEY)
                 cls.API_BASE_URL = config.get('api_base_url', cls.API_BASE_URL)
+                cls.OPENAI_API_KEY = config.get('openai_api_key', cls.OPENAI_API_KEY)
+                cls.OPENAI_BASE_URL = config.get('openai_base_url', cls.OPENAI_BASE_URL)
+                cls.OPENAI_TEXT_MODEL = config.get('openai_text_model', cls.OPENAI_TEXT_MODEL)
                 cls.TEXT_MODEL = config.get('text_model', cls.TEXT_MODEL)
                 cls.IMAGE_MODEL = config.get('image_model', cls.IMAGE_MODEL)
                 cls.VIDEO_MODEL = config.get('video_model', cls.VIDEO_MODEL)
@@ -162,6 +171,9 @@ class Settings:
             'last_project_name': cls.LAST_PROJECT_NAME,
             'api_key': cls.API_KEY,
             'api_base_url': cls.API_BASE_URL,
+            'openai_api_key': cls.OPENAI_API_KEY,
+            'openai_base_url': cls.OPENAI_BASE_URL,
+            'openai_text_model': cls.OPENAI_TEXT_MODEL,
             'text_model': cls.TEXT_MODEL,
             'image_model': cls.IMAGE_MODEL,
             'video_model': cls.VIDEO_MODEL,

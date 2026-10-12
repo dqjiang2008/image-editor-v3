@@ -43,17 +43,18 @@ class _ChatWorker(QThread):
     def run(self):
         async def _do():
             session = await self.client._get_session()
+            text_config = self.client.text_api_config()
             data = {
-                "model": Settings.TEXT_MODEL,
+                "model": text_config["model"],
                 "messages": self.messages,
                 "temperature": self.temperature,
                 "max_tokens": self.max_tokens,
             }
             headers = {
                 "Content-Type": "application/json",
-                "Authorization": f"Bearer {self.client.api_key}",
+                "Authorization": f"Bearer {text_config['api_key'] or self.client.api_key}",
             }
-            url = f"{self.client.base_url}/v1/chat/completions"
+            url = f"{(text_config['base_url'] or self.client.base_url).rstrip('/')}/v1/chat/completions"
             async with session.post(url, headers=headers, json=data) as resp:
                 if resp.status != 200:
                     text = await resp.text()
@@ -94,8 +95,9 @@ class _StreamWorker(QThread):
     def run(self):
         async def _do():
             session = await self.client._get_session()
+            text_config = self.client.text_api_config()
             data = {
-                "model": Settings.TEXT_MODEL,
+                "model": text_config["model"],
                 "messages": self.messages,
                 "temperature": self.temperature,
                 "max_tokens": self.max_tokens,
@@ -103,9 +105,9 @@ class _StreamWorker(QThread):
             }
             headers = {
                 "Content-Type": "application/json",
-                "Authorization": f"Bearer {self.client.api_key}",
+                "Authorization": f"Bearer {text_config['api_key'] or self.client.api_key}",
             }
-            url = f"{self.client.base_url}/v1/chat/completions"
+            url = f"{(text_config['base_url'] or self.client.base_url).rstrip('/')}/v1/chat/completions"
             content = ""
             reasoning = ""
             async with session.post(url, headers=headers, json=data) as resp:

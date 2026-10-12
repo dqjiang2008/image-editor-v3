@@ -1091,11 +1091,11 @@ class MainWindow(QMainWindow):
         print(f"{'='*60}\n", file=sys.stderr)
         
         # 检查API Key是否配置
-        if not Settings.API_KEY or Settings.API_KEY == "":
+        if (not Settings.API_KEY or Settings.API_KEY == "") and not (Settings.OPENAI_API_KEY or "").strip():
             print(f"[错误] API Key 未配置！", file=sys.stderr)
             QMessageBox.critical(self, "配置错误", 
                 "API Key 未配置！\n\n"
-                "请在 设置 -> API配置 中填写你的 API Key")
+                "请在 设置 -> API配置 或 设置 -> 文本处理中填写 API Key")
         
         self.client = AgnesAIClient(
             api_key=Settings.API_KEY,
@@ -4246,7 +4246,7 @@ class MainWindow(QMainWindow):
         if self.project and self.project.story:
             self.story_text.setPlainText(self.project.story)
 
-        # 同步长度下拉框（AI 可能已根据故事内容更新了项目长度）
+        # 将故事长度下拉框同步为项目里保存的用户选择。
         if hasattr(self, 'story_length_combo') and self.project:
             length_map = {"very_short": "超短 (3分钟)", "short": "短 (5分钟)", "medium": "中 (10分钟)", "long": "长 (20分钟)"}
             length_text = length_map.get(self.project.length, "中 (10分钟)")
