@@ -162,6 +162,43 @@ _SINGLE_PERSON_PHRASE_PATTERNS = [
 ]
 
 
+def _estimate_target_duration_from_story(story: str, length: str = None) -> tuple:
+    """根据故事文本内容量智能推断目标时长和分镜数。
+
+    策略：
+    1. 以用户选择的长度档位为基准（尊重用户意图）
+    2. 根据故事字数修正：字数越多，时长越长（不低于档位下限）
+    3. 返回 (target_seconds, target_shot_count, adjusted_length)
+
+    经验值（中文视频脚本）：
+    - 每 150-200 字约 1 分钟视频内容
+    - 每个分镜 4-12 秒，平均约 7 秒
+    """
+    char_count = len(story.strip())
+    base_seconds = LENGTH_DURATION_MAP.get(length, 600) if length else 600
+    base_shot_count = Settings.LENGTH_SCENE_COUNT.get(length, 50) if length else 50
+
+    minutes_by_chars = max(1, char_count / 175)
+    seconds_by_chars = minutes_by_chars * 60
+
+    target_seconds = max(base_seconds, seconds_by_chars)
+    target_seconds = min(target_seconds, 2400)
+
+    target_shot_count = max(base_shot_count, int(target_seconds / 7))
+    target_shot_count = min(target_shot_count, 200)
+
+    if target_seconds <= 240:
+        adjusted_length = "very_short"
+    elif target_seconds <= 420:
+        adjusted_length = "short"
+    elif target_seconds <= 900:
+        adjusted_length = "medium"
+    else:
+        adjusted_length = "long"
+
+    return int(target_seconds), target_shot_count, adjusted_length
+
+
 def _infer_length_from_duration(total_seconds: float) -> str:
     """根据实际总时长反推最接近的长度档位"""
     if total_seconds <= 240:
@@ -1128,8 +1165,12 @@ class AnimationProducer:
     
     def _get_video_size(self) -> str:
         """根据项目配置返回视频生成尺寸"""
+        return "720P"  # AGNES API 视频尺寸参数（分辨率档位）
+
+    def _get_video_aspect_ratio(self) -> str:
+        """根据项目配置返回视频画幅比：竖屏 9:16，否则 16:9"""
         orientation = getattr(self.project, 'video_orientation', 'landscape')
-        return "720P"  # AGNES API 视频尺寸参数，横竖屏由 API 自动适配
+        return "9:16" if orientation == "portrait" else "16:9"
 
     # ------------------------------------------------------------------
     # 技能包上下文（resources/skills/ 接入点）
@@ -1773,9 +1814,14 @@ class AnimationProducer:
         """剧集模式：从整部剧原文一次性提取全局资产（角色/道具/场景，全剧共享）"""
         ep_count = len(getattr(self.project, 'episodes', [])) or 1
         length_key = length or self.project.length or "very_short"
-        per_ep_seconds = LENGTH_DURATION_MAP.get(length_key, 180)
+
+        per_ep_seconds, per_ep_shots, _ = _estimate_target_duration_from_story(
+            script_text[:2000], length_key
+        )
+        per_ep_seconds = per_ep_seconds // max(ep_count, 1)
+        per_ep_seconds = max(per_ep_seconds, LENGTH_DURATION_MAP.get(length_key, 180))
+
         total_seconds = per_ep_seconds * ep_count
-        # 全剧场景数：每集约2个主要场景，封顶30个
         series_scene_count = max(5, min(ep_count * 2, 30))
         video_context = (
             f"这是一部共{ep_count}集的连续短剧，每集约{per_ep_seconds // 60}分钟"
@@ -1903,30 +1949,29 @@ class AnimationProducer:
         project_name = project_name.replace('\n', '').replace('\r', '').strip()
         self._log(f"AI 建议的项目名称: {project_name}（保持原名称: {self.project.name}）")
         
-        # 按故事长度档位计算参考分镜数与总时长上限；AI将自行决定实际数量
-        if length:
-            target_scene_count = Settings.LENGTH_SCENE_COUNT.get(length, Settings.DEFAULT_SCENE_COUNT)
-        else:
-            target_scene_count = Settings.DEFAULT_SCENE_COUNT
-        target_duration = (
-            LENGTH_DURATION_MAP.get(length, target_scene_count * Settings.DEFAULT_DURATION)
-            if length else target_scene_count * Settings.DEFAULT_DURATION
+        # 智能推断目标时长和分镜数：综合用户选择的档位 + 故事实际内容量
+        target_duration, target_scene_count, adjusted_length = _estimate_target_duration_from_story(
+            story, length
+        )
+        self._log(
+            f"故事字数: {len(story.strip())}, 用户档位: {length or '默认'}, "
+            f"智能推断: 目标时长 {target_duration}秒({target_duration // 60}分钟), "
+            f"目标分镜数 {target_scene_count}, 推断档位 {adjusted_length}"
         )
         # 场景要少：每场景约 3 个镜头 → 场景数 ≈ 分镜数 / 3
         target_scene_image_count = max(3, round(target_scene_count / 3))
         avg_scene_seconds = target_duration / max(target_scene_image_count, 1)
         avg_shot_seconds = target_duration / max(target_scene_count, 1)
         video_context = (
-            f"该故事将制作成视频，参考时长上限约{target_duration // 60}分钟（{target_duration}秒），"
-            f"参考场景数约{target_scene_image_count}个，参考分镜数约{target_scene_count}个。"
-            f"分镜数量和时长由你根据故事内容自行决定，以上数值仅作参考上限，"
-            f"确保完整讲述故事即可，不必凑满参考数量。"
+            f"该故事将制作成视频，目标时长约{target_duration // 60}分钟（{target_duration}秒），"
+            f"目标场景数约{target_scene_image_count}个，目标分镜数约{target_scene_count}个。"
+            f"请按此目标生成分镜，确保完整讲述故事，不要大幅缩减内容。"
             f"平均每个场景约{avg_scene_seconds:.1f}秒、每个镜头约{avg_shot_seconds:.1f}秒。"
         )
         self._log(
-            f"时长档位: {length or '默认'}, 参考分镜上限: {target_scene_count}, "
-            f"参考场景上限: {target_scene_image_count}, 参考总时长上限: {target_duration}秒, "
-            f"平均每镜: {avg_shot_seconds:.1f}秒（AI将自行决定实际数量）"
+            f"目标分镜数: {target_scene_count}, "
+            f"目标场景数: {target_scene_image_count}, 目标总时长: {target_duration}秒({target_duration // 60}分钟), "
+            f"平均每镜: {avg_shot_seconds:.1f}秒"
         )
         
         # 提取角色（按时长上下文生成详细的关键角色描述）
@@ -2053,10 +2098,15 @@ class AnimationProducer:
             f"{index}. {scene.name}: {scene.description}"
             for index, scene in enumerate(self.project.scenes, start=1)
         ) if self.project.scenes else ""
+        batch_hint = f"（将分{(scene_count + 29) // 30}批生成，每批≤30个分镜）" if scene_count > 40 else ""
         self._log(
-            f"参考分镜上限: {scene_count}, 参考总时长上限: {target_duration}秒 ({target_duration/60:.1f}分钟) "
-            f"(length={length}, extract_scenes 返回 {extracted_scene_count} 个场景, AI自行决定实际数量)"
+            f"目标分镜数: {scene_count}, 目标总时长: {target_duration}秒 ({target_duration/60:.1f}分钟) "
+            f"(length={length}, extract_scenes 返回 {extracted_scene_count} 个场景) {batch_hint}"
         )
+
+        def _batch_progress(batch_num, total_batches):
+            self._log(f"  📦 分批生成进度：第 {batch_num}/{total_batches} 批...")
+
         storyboard_data = await self.client.generate_script(
             story, 
             scene_count, 
@@ -2064,13 +2114,18 @@ class AnimationProducer:
             scene_context=scene_context,
             characters=[{"name": c.name} for c in self.project.characters],
             auto_count=True,
+            progress_callback=_batch_progress,
         )
         
-        # auto_count 模式：AI 自行决定分镜数和时长，不再强制缩放
-        # 仅当实际时长超出上限 20% 时才缩放（防止失控）
         total_ai_duration = sum(sb_data.get("duration", 5) for sb_data in storyboard_data)
         actual_sb_count = len(storyboard_data)
-        self._log(f"AI自行决定: {actual_sb_count} 个分镜, 总时长 {total_ai_duration:.1f}秒 ({total_ai_duration/60:.1f}分钟)")
+        self._log(f"AI生成: {actual_sb_count} 个分镜, 总时长 {total_ai_duration:.1f}秒 ({total_ai_duration/60:.1f}分钟)")
+
+        if total_ai_duration < target_duration * 0.5:
+            self._log(
+                f"⚠️ AI生成时长({total_ai_duration:.0f}秒)远低于目标({target_duration}秒)，"
+                f"可能遗漏了部分情节。建议检查分镜完整性，必要时重新提取。"
+            )
         
         if total_ai_duration > target_duration * 1.2:
             self._log(f"⚠️ AI生成的时长超出上限20%，将按比例缩放分镜时长")
@@ -2081,11 +2136,11 @@ class AnimationProducer:
             total_ai_duration = sum(sb_data.get("duration", 5) for sb_data in storyboard_data)
             self._log(f"✅ 缩放后分镜总时长: {total_ai_duration:.1f}秒 ({total_ai_duration/60:.1f}分钟)")
 
-        # 根据实际分镜数和时长更新项目长度档位
+        # 根据实际分镜数和时长推断档位，仅作日志提示，不覆盖用户选择
         actual_length = _infer_length_from_duration(total_ai_duration)
-        if actual_length != (length or self.project.length):
-            self._log(f"📐 根据AI实际生成时长 {total_ai_duration:.0f}秒，更新项目长度: {length or self.project.length} → {actual_length}")
-            self.project.length = actual_length
+        user_length = length or self.project.length or "medium"
+        if actual_length != user_length:
+            self._log(f"ℹ️ AI实际生成时长 {total_ai_duration:.0f}秒 对应档位 {actual_length}，用户选择档位 {user_length}，保留用户选择")
         
         for sb_data in storyboard_data:
             dialogue_role_name = sb_data.get("dialogue_role", "")
@@ -2175,9 +2230,18 @@ class AnimationProducer:
         
         self._report_scene_match_summary()
 
-        self.project.global_characters = list(self.project.characters)
-        self.project.global_props = list(self.project.props)
-        self.project.global_scenes = list(self.project.scenes)
+        if not self.project.global_characters:
+            self.project.global_characters = list(self.project.characters)
+        elif len(self.project.characters) > len(self.project.global_characters):
+            self.project.global_characters = list(self.project.characters)
+        if not getattr(self.project, 'global_props', []):
+            self.project.global_props = list(self.project.props)
+        elif len(self.project.props) > len(getattr(self.project, 'global_props', [])):
+            self.project.global_props = list(self.project.props)
+        if not self.project.global_scenes:
+            self.project.global_scenes = list(self.project.scenes)
+        elif len(self.project.scenes) > len(self.project.global_scenes):
+            self.project.global_scenes = list(self.project.scenes)
 
         self._save_assets_to_library()
 
@@ -3643,19 +3707,19 @@ class AnimationProducer:
             ep_data = (getattr(self.project, 'episode_data', {}) or {}).get(str(cur_ep), {})
             ep_scene_names = ep_data.get("scene_names", [])
 
-            # 每集时长直接取 LENGTH_DURATION_MAP（已是每集时长）
-            total_duration = LENGTH_DURATION_MAP.get(self.project.length, 180)
-            # 每集分镜数：按每集时长和场景数计算
-            per_ep_sb_count = Settings.LENGTH_SCENE_COUNT.get(self.project.length, 15)
+            ep_text = story_text or ""
+            est_duration, est_shots, _ = _estimate_target_duration_from_story(
+                ep_text, self.project.length
+            )
+            total_duration = est_duration
+            per_ep_sb_count = est_shots
             storyboard_count = max(per_ep_sb_count, scene_count, 3)
         else:
-            total_duration = LENGTH_DURATION_MAP.get(
-                self.project.length, scene_count * Settings.DEFAULT_DURATION
+            est_duration, est_shots, _ = _estimate_target_duration_from_story(
+                story_text, self.project.length
             )
-            storyboard_count = max(
-                Settings.LENGTH_SCENE_COUNT.get(self.project.length, scene_count * 3),
-                scene_count,
-            )
+            total_duration = est_duration
+            storyboard_count = max(est_shots, scene_count)
 
         # 日志：明确标注使用的是当前集的场景和时长
         if ep_scene_names:
@@ -3712,9 +3776,14 @@ class AnimationProducer:
             # 构建角色列表：只使用当前集引用的角色（project.characters 已在选集时筛选）
             characters_list = [{"name": c.name} for c in self.project.characters]
 
+            batch_hint = f"（将分{(storyboard_count + 29) // 30}批生成，每批≤30个分镜）" if storyboard_count > 40 else ""
             self._log(
-                f"🤖 剧本文本中未找到分镜结构，调用AI生成分镜脚本..."
+                f"🤖 故事为大纲/叙述格式，无预置分镜结构，调用AI生成分镜脚本（目标{storyboard_count}个分镜，约{total_duration // 60}分钟）{batch_hint}..."
             )
+
+            def _batch_progress(batch_num, total_batches):
+                self._log(f"  📦 分批生成进度：第 {batch_num}/{total_batches} 批...")
+
             storyboard_data = await self.client.generate_script(
                 story_text,
                 scene_count=storyboard_count,
@@ -3722,6 +3791,7 @@ class AnimationProducer:
                 scene_context=scene_context,
                 characters=characters_list,
                 auto_count=True,
+                progress_callback=_batch_progress,
             )
         if not storyboard_data:
             raise ValueError(f"分镜脚本生成结果为空（当前场景数: {scene_count}）")
@@ -3953,6 +4023,7 @@ class AnimationProducer:
                         first_frame=first_frame,
                         mode=mode,
                         size=self._get_video_size(),
+                        aspect_ratio=self._get_video_aspect_ratio(),
                         progress_callback=lambda msg: self._log(f"分镜 {scene_index} {msg}"),
                         audios=audios if audios else None,
                         extra_images=reference_images[1:]
@@ -3967,6 +4038,7 @@ class AnimationProducer:
                         first_frame=first_frame,
                         mode=mode,
                         size=self._get_video_size(),
+                        aspect_ratio=self._get_video_aspect_ratio(),
                         progress_callback=lambda msg: self._log(f"分镜 {scene_index} {msg}"),
                         audios=None
                     )
@@ -3984,6 +4056,7 @@ class AnimationProducer:
                         first_frame=first_frame,
                         mode=mode,
                         size=self._get_video_size(),
+                        aspect_ratio=self._get_video_aspect_ratio(),
                         progress_callback=lambda msg: self._log(f"分镜 {scene_index} {msg}"),
                         audios=audios,
                         extra_images=reference_images[1:]
@@ -3998,6 +4071,7 @@ class AnimationProducer:
                         first_frame=first_frame,
                         mode=mode,
                         size=self._get_video_size(),
+                        aspect_ratio=self._get_video_aspect_ratio(),
                         progress_callback=lambda msg: self._log(f"分镜 {scene_index} {msg}"),
                         audios=None
                     )

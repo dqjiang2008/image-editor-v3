@@ -12,7 +12,7 @@ class Settings:
     
     # 应用信息
     APP_NAME = "AI视频生成工具"
-    APP_VERSION = "2.5.0"
+    APP_VERSION = "2.7.0"
     APP_AUTHOR = "AI Assistant"
     
     # 目录配置

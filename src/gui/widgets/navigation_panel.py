@@ -8,6 +8,8 @@ class NavigationPanel(QWidget):
     """Compact navigation menu for the main work pages."""
 
     ITEMS = (
+        ("💬", "对话"),
+        ("🎨", "画图"),
         ("📁", "项目"),
         ("📖", "故事"),
         ("👤", "角色"),
@@ -79,7 +81,7 @@ class NavigationPanel(QWidget):
             layout.addWidget(button)
 
         layout.addStretch()
-        version_label = QLabel("v2.0")
+        version_label = QLabel("v2.6")
         version_label.setStyleSheet("color: #475569; font-size: 10px; padding: 8px;")
         version_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(version_label)

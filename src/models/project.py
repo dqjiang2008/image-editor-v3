@@ -408,10 +408,13 @@ class ProjectManager:
         project.name = name
         d = self._project_dir(name)
         d.mkdir(parents=True, exist_ok=True)
-        # 保存前：global_* 始终同步为 characters/props/scenes 的副本
-        project.global_characters = list(project.characters) if project.characters else []
-        project.global_props = list(project.props) if project.props else []
-        project.global_scenes = list(project.scenes) if project.scenes else []
+        # 保存前：确保 global_* 存在（剧集模式下 global_* 是全剧资产，绝不能用当前集子集覆盖）
+        if not project.global_characters and project.characters:
+            project.global_characters = list(project.characters)
+        if not getattr(project, 'global_props', []) and getattr(project, 'props', []):
+            project.global_props = list(project.props)
+        if not project.global_scenes and project.scenes:
+            project.global_scenes = list(project.scenes)
         self._save_meta(project)
         self._save_characters(project)
         self._save_props(project)
@@ -451,9 +454,12 @@ class ProjectManager:
         self._write_json(d / "project.json", meta)
 
     def _save_characters(self, project: Project):
-        """保存角色：始终保存到项目目录 characters.json；有资产库则同步到库。"""
+        """保存角色：始终保存 global_characters 到项目目录 characters.json；有资产库则同步到库。"""
         d = self._project_dir(project.name)
-        chars_data = [c.to_dict() for c in getattr(project, "characters", [])]
+        # 剧集模式下 global_characters 是全剧角色，characters 只是当前集子集
+        # 保存全剧角色到 characters.json，确保加载时能恢复完整数据
+        save_chars = getattr(project, 'global_characters', []) or getattr(project, 'characters', [])
+        chars_data = [c.to_dict() for c in save_chars]
         self._write_json(d / "characters.json", chars_data)
 
         lib_name = getattr(project, 'asset_library_name', '') or ''
@@ -466,16 +472,17 @@ class ProjectManager:
         old_scenes = lib.get("scenes", []) if lib else []
         
         old_char_map = {c.name: c for c in old_chars}
-        for char in project.characters:
+        for char in save_chars:
             old_char_map[char.name] = char
         merged_chars = list(old_char_map.values())
         
         save_library(lib_name, merged_chars, old_props, old_scenes, merge=False)
 
     def _save_props(self, project: Project):
-        """保存道具：始终保存到项目目录 props.json；有资产库则同步到库。"""
+        """保存道具：始终保存 global_props 到项目目录 props.json；有资产库则同步到库。"""
         d = self._project_dir(project.name)
-        props_data = [p.to_dict() for p in getattr(project, "props", [])]
+        save_props = getattr(project, 'global_props', []) or getattr(project, 'props', [])
+        props_data = [p.to_dict() for p in save_props]
         self._write_json(d / "props.json", props_data)
 
         lib_name = getattr(project, 'asset_library_name', '') or ''
@@ -488,16 +495,17 @@ class ProjectManager:
         old_scenes = lib.get("scenes", []) if lib else []
         
         old_prop_map = {p.name: p for p in old_props}
-        for prop in getattr(project, "props", []):
+        for prop in save_props:
             old_prop_map[prop.name] = prop
         merged_props = list(old_prop_map.values())
         
         save_library(lib_name, old_chars, merged_props, old_scenes, merge=False)
 
     def _save_scenes(self, project: Project):
-        """保存场景：始终保存到项目目录 scenes.json；有资产库则同步到库。"""
+        """保存场景：始终保存 global_scenes 到项目目录 scenes.json；有资产库则同步到库。"""
         d = self._project_dir(project.name)
-        scenes_data = [s.to_dict() for s in getattr(project, "scenes", [])]
+        save_scenes = getattr(project, 'global_scenes', []) or getattr(project, 'scenes', [])
+        scenes_data = [s.to_dict() for s in save_scenes]
         self._write_json(d / "scenes.json", scenes_data)
 
         lib_name = getattr(project, 'asset_library_name', '') or ''
@@ -510,7 +518,7 @@ class ProjectManager:
         old_scenes = lib.get("scenes", []) if lib else []
         
         old_scene_map = {s.name: s for s in old_scenes}
-        for scene in project.scenes:
+        for scene in save_scenes:
             old_scene_map[scene.name] = scene
         merged_scenes = list(old_scene_map.values())
         

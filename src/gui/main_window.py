@@ -44,6 +44,8 @@ from src.gui.widgets.log_panel import LogPanel
 from src.gui.widgets.media_panel import MediaPanel
 from src.gui.widgets.main_toolbar import MainToolbar
 from src.gui.widgets.navigation_panel import NavigationPanel
+from src.gui.widgets.chat_page import ChatPage
+from src.gui.widgets.image_gen_page import ImageGenPage
 from src.gui.widgets.project_info_page import ProjectInfoPage
 from src.gui.widgets.story_page import StoryPage
 from src.gui.widgets.character_page import CharacterPage
@@ -287,14 +289,18 @@ class MainWindow(QMainWindow):
         """统一刷新页面入口，保证跨页面修改后的数据及时同步。"""
         if not self.project:
             self._refresh_ui()
-            self.video_list.clear()
+            self.video_table.setRowCount(0)
             self.video_stats_label.setText("视频总数: 0")
             self._update_stats()
             return
 
         if page_index == 0:
-            self._refresh_ui()
+            pass  # 对话页：无需刷新项目数据
         elif page_index == 1:
+            pass  # 画图页：无需刷新项目数据
+        elif page_index == 2:
+            self._refresh_ui()
+        elif page_index == 3:
             self.story_text.setPlainText(self.project.story)
             self.story_topic_input.setText(self.project.topic)
             length_map = {
@@ -308,15 +314,15 @@ class MainWindow(QMainWindow):
             )
             if length_index >= 0:
                 self.story_length_combo.setCurrentIndex(length_index)
-        elif page_index == 2:
-            self._refresh_character_list()
-        elif page_index == 3:
-            self._refresh_prop_list()
         elif page_index == 4:
-            self._refresh_scene_list()
+            self._refresh_character_list()
         elif page_index == 5:
-            self._refresh_storyboard_table()
+            self._refresh_prop_list()
         elif page_index == 6:
+            self._refresh_scene_list()
+        elif page_index == 7:
+            self._refresh_storyboard_table()
+        elif page_index == 8:
             self._refresh_video_list()
         self._update_stats()
     
@@ -596,13 +602,15 @@ class MainWindow(QMainWindow):
         """)
         
         # 添加各个页面（与左侧导航对应）
-        self.work_stack.addWidget(self._create_project_info_page())  # 0: 项目信息
-        self.work_stack.addWidget(self._create_story_tab())          # 1: 故事
-        self.work_stack.addWidget(self._create_character_tab())      # 2: 角色
-        self.work_stack.addWidget(self._create_prop_tab())           # 3: 道具
-        self.work_stack.addWidget(self._create_scene_tab())          # 4: 场景
-        self.work_stack.addWidget(self._create_storyboard_tab())     # 5: 分镜
-        self.work_stack.addWidget(self._create_video_tab())          # 6: 视频
+        self.work_stack.addWidget(self._create_chat_page())          # 0: 对话
+        self.work_stack.addWidget(self._create_image_gen_page())     # 1: 画图
+        self.work_stack.addWidget(self._create_project_info_page())  # 2: 项目信息
+        self.work_stack.addWidget(self._create_story_tab())          # 3: 故事
+        self.work_stack.addWidget(self._create_character_tab())      # 4: 角色
+        self.work_stack.addWidget(self._create_prop_tab())           # 5: 道具
+        self.work_stack.addWidget(self._create_scene_tab())          # 6: 场景
+        self.work_stack.addWidget(self._create_storyboard_tab())     # 7: 分镜
+        self.work_stack.addWidget(self._create_video_tab())          # 8: 视频
 
         from src.gui.styles import HighContrastCheckDelegate
         check_delegate = HighContrastCheckDelegate()
@@ -615,6 +623,16 @@ class MainWindow(QMainWindow):
 
         return self.work_stack
     
+    def _create_chat_page(self) -> QWidget:
+        page = ChatPage()
+        self._chat_page = page
+        return page
+
+    def _create_image_gen_page(self) -> QWidget:
+        page = ImageGenPage()
+        self._image_gen_page = page
+        return page
+
     def _create_project_info_page(self) -> QWidget:
         page = ProjectInfoPage()
         self._project_info_page = page
@@ -1023,6 +1041,11 @@ class MainWindow(QMainWindow):
                 self.project_manager.save_project(self.project)
             except Exception as e:
                 self._log(f"退出时自动保存失败: {e}")
+        if hasattr(self, '_chat_page') and hasattr(self._chat_page, '_save_history'):
+            try:
+                self._chat_page._save_history()
+            except Exception:
+                pass
         super().closeEvent(ev)
 
     def _setup_status_bar(self):
@@ -1083,6 +1106,11 @@ class MainWindow(QMainWindow):
         )
         self.project_manager = ProjectManager(str(Settings.PROJECTS_DIR))
         
+        # 将 client 传递给对话页和画图页
+        if hasattr(self, '_chat_page'):
+            self._chat_page.set_client(self.client)
+        if hasattr(self, '_image_gen_page'):
+            self._image_gen_page.set_client(self.client)
         
         # 自动加载上次的项目
         if Settings.LAST_PROJECT_NAME:
@@ -1369,7 +1397,7 @@ class MainWindow(QMainWindow):
         
         if msg.clickedButton() == gen_btn:
             self.story_topic_input.setText(self.project.name)
-            self._switch_to_page(0)
+            self._switch_to_page(2)
             self._on_generate_story()
     
     def _on_open_project(self):
@@ -1630,16 +1658,47 @@ class MainWindow(QMainWindow):
         self._update_stats()
     
     def _sync_global_from_library(self):
-        """确保 global_* 与 characters/props/scenes 同步。
+        """确保 global_* 数据完整。
 
-        数据源已统一为项目目录 JSON 文件（load_project 只从文件加载），
-        此函数仅保证 global_* 始终是 characters/props/scenes 的副本。
+        剧集模式下 global_* 是全剧资产（由提取/生成时写入），characters/props/scenes
+        只是当前集子集，绝不能用子集覆盖全局。
+        优先级：资产库 > global_* > characters/props/scenes
+        如果资产库数据比 global_* 更完整（修复旧 bug 导致的 global_* 被覆盖问题），用资产库补全。
         """
         if not self.project:
             return
-        self.project.global_characters = list(self.project.characters) if self.project.characters else []
-        self.project.global_props = list(self.project.props) if self.project.props else []
-        self.project.global_scenes = list(self.project.scenes) if self.project.scenes else []
+
+        # 尝试从资产库恢复更完整的数据
+        lib_name = getattr(self.project, 'asset_library_name', '') or ''
+        if lib_name:
+            try:
+                from src.services.library_manager import load_library
+                lib = load_library(lib_name)
+                if lib:
+                    lib_chars = lib.get("characters", []) or []
+                    lib_props = lib.get("props", []) or []
+                    lib_scenes = lib.get("scenes", []) or []
+                    # 资产库角色比 global_characters 多 → 用资产库恢复
+                    if len(lib_chars) > len(self.project.global_characters):
+                        self._log(f"从资产库恢复角色: {len(self.project.global_characters)} → {len(lib_chars)}")
+                        from src.models.project import Character, Prop, Scene
+                        self.project.global_characters = [Character.from_dict(c) if isinstance(c, dict) else c for c in lib_chars]
+                    if len(lib_props) > len(getattr(self.project, 'global_props', []) or []):
+                        from src.models.project import Prop
+                        self.project.global_props = [Prop.from_dict(p) if isinstance(p, dict) else p for p in lib_props]
+                    if len(lib_scenes) > len(self.project.global_scenes):
+                        from src.models.project import Scene
+                        self.project.global_scenes = [Scene.from_dict(s) if isinstance(s, dict) else s for s in lib_scenes]
+            except Exception:
+                pass
+
+        # 兜底：global_* 为空时从 characters/props/scenes 补全
+        if not self.project.global_characters and self.project.characters:
+            self.project.global_characters = list(self.project.characters)
+        if not getattr(self.project, 'global_props', []) and getattr(self.project, 'props', []):
+            self.project.global_props = list(self.project.props)
+        if not self.project.global_scenes and self.project.scenes:
+            self.project.global_scenes = list(self.project.scenes)
     
     def _get_section_display_name(self) -> str:
         """获取当前选定节的显示名称（如 '2.3 xx'），没有选节则返回空字符串"""
@@ -2036,7 +2095,7 @@ class MainWindow(QMainWindow):
             msg.exec()
             clicked = msg.clickedButton()
             if clicked == costume_btn:
-                self._switch_to_page(2)
+                self._switch_to_page(4)
                 QTimer.singleShot(300, self._on_import_costumes)
             elif clicked == ep_btn:
                 QTimer.singleShot(300, self._prompt_episode_selection)
@@ -4274,7 +4333,7 @@ class MainWindow(QMainWindow):
         if clicked == extract_btn:
             self._on_extract_from_story()
         elif clicked == edit_btn:
-            self._switch_to_page(0)
+            self._switch_to_page(3)
             if hasattr(self, 'edit_story_btn'):
                 self.edit_story_btn.setChecked(True)
                 self.story_text.setReadOnly(False)
@@ -4922,8 +4981,10 @@ class MainWindow(QMainWindow):
                 self.prop_stats_label.setText("道具总数: 0")
             return
 
-        # 数据源：project.props（load_project 已从 JSON 文件加载并同步）
-        global_props = getattr(self.project, 'props', []) or []
+        # 数据源：剧集模式下 global_props 是全剧道具，props 只是当前集子集
+        global_props = getattr(self.project, 'global_props', []) or []
+        if not global_props:
+            global_props = getattr(self.project, 'props', []) or []
 
         episodes = getattr(self.project, 'episodes', [])
         cur_ep = getattr(self.project, 'current_episode', -1)
@@ -5029,7 +5090,9 @@ class MainWindow(QMainWindow):
             return
         
         # 与 _refresh_prop_list 使用一致的数据源
-        global_props = getattr(self.project, 'props', []) or []
+        global_props = getattr(self.project, 'global_props', []) or []
+        if not global_props:
+            global_props = getattr(self.project, 'props', []) or []
 
         episodes = getattr(self.project, 'episodes', [])
         cur_ep = getattr(self.project, 'current_episode', -1)
@@ -5536,8 +5599,10 @@ class MainWindow(QMainWindow):
         if row < 0:
             return
         
-        # 数据源：project.characters（与 _refresh_character_list 一致）
-        chars = self.project.characters or []
+        # 数据源：与 _refresh_character_list 一致，使用 global_characters
+        chars = getattr(self.project, 'global_characters', []) or []
+        if not chars:
+            chars = self.project.characters or []
         if row >= len(chars):
             return
         character = chars[row]
@@ -6316,7 +6381,9 @@ class MainWindow(QMainWindow):
             return
 
         # 与 _refresh_character_list 使用完全一致的数据源
-        global_chars = getattr(self.project, 'characters', []) or []
+        global_chars = getattr(self.project, 'global_characters', []) or []
+        if not global_chars:
+            global_chars = getattr(self.project, 'characters', []) or []
 
         show_all = hasattr(self, 'char_filter_combo') and self.char_filter_combo.currentIndex() == 1
         
@@ -6530,8 +6597,10 @@ class MainWindow(QMainWindow):
 
         self.character_list.clear()
 
-        # 数据源：project.characters（load_project 已从 JSON 文件加载并同步）
-        global_chars = getattr(self.project, 'characters', []) or []
+        # 数据源：剧集模式下 global_characters 是全剧角色，characters 只是当前集子集
+        global_chars = getattr(self.project, 'global_characters', []) or []
+        if not global_chars:
+            global_chars = getattr(self.project, 'characters', []) or []
 
         episodes = getattr(self.project, 'episodes', [])
         cur_ep = getattr(self.project, 'current_episode', -1)
@@ -6909,7 +6978,9 @@ class MainWindow(QMainWindow):
             return
 
         # 与 _refresh_scene_list 使用一致的数据源
-        global_scenes = getattr(self.project, 'scenes', []) or []
+        global_scenes = getattr(self.project, 'global_scenes', []) or []
+        if not global_scenes:
+            global_scenes = getattr(self.project, 'scenes', []) or []
 
         show_all = hasattr(self, 'scene_filter_combo') and self.scene_filter_combo.currentIndex() == 1
         if show_all and global_scenes:
@@ -7136,8 +7207,10 @@ class MainWindow(QMainWindow):
 
         self.scene_list.clear()
 
-        # 数据源：project.scenes（load_project 已从 JSON 文件加载并同步）
-        global_scenes = getattr(self.project, 'scenes', []) or []
+        # 数据源：剧集模式下 global_scenes 是全剧场景，scenes 只是当前集子集
+        global_scenes = getattr(self.project, 'global_scenes', []) or []
+        if not global_scenes:
+            global_scenes = getattr(self.project, 'scenes', []) or []
 
         episodes = getattr(self.project, 'episodes', [])
         cur_ep = getattr(self.project, 'current_episode', -1)
@@ -8163,7 +8236,7 @@ class MainWindow(QMainWindow):
                 QMessageBox.StandardButton.Yes,
             )
             if ret == QMessageBox.StandardButton.Yes:
-                self._switch_to_page(0)
+                self._switch_to_page(2)
             return
 
         # ② 按文件解析预设分镜（跳过 AI 生成）：
@@ -8208,7 +8281,7 @@ class MainWindow(QMainWindow):
         self.producer._save_episode_snapshot(cur_ep)
         self._refresh_storyboard_table()
         self._update_stats()
-        self._switch_to_page(4)
+        self._switch_to_page(7)
         QMessageBox.information(
             self, "导入完成",
             f"已为 [{ep_title}] 导入 {len(storyboards)} 个分镜条目：\n"
@@ -8246,6 +8319,95 @@ class MainWindow(QMainWindow):
             f"[{ep_title}] 分镜生成完成：共 {count} 个分镜。\n\n"
             f"下一步：在分镜页生成「分镜图」和「视频」。"
         )
+
+    def _on_ai_regenerate_storyboard(self):
+        """AI 重新生成分镜脚本：根据故事内容和时长自动推断目标，清空旧分镜后重新生成"""
+        if not self.project:
+            QMessageBox.warning(self, "警告", "请先创建或打开项目")
+            return
+        if not self.project.story:
+            QMessageBox.warning(self, "警告", "请先完成故事")
+            return
+        if not self.client or not self.client.api_key:
+            QMessageBox.warning(self, "警告", "请先配置 API Key")
+            return
+
+        from src.core.producer import _estimate_target_duration_from_story, LENGTH_DURATION_MAP
+        from src.config.settings import Settings as S
+
+        story = self.project.story
+        length = self.project.length or "medium"
+        target_seconds, target_shots, adjusted_length = _estimate_target_duration_from_story(story, length)
+        char_count = len(story.strip())
+
+        has_existing = len(self.project.storyboard) > 0
+        if has_existing:
+            confirm = QMessageBox.question(
+                self, "⚠️ 确认重新生成",
+                f"当前已有 {len(self.project.storyboard)} 个分镜。\n\n"
+                f"AI 将根据故事内容重新生成分镜脚本：\n"
+                f"  📝 故事字数: {char_count}\n"
+                f"  ⏱️ 目标时长: {target_seconds // 60}分钟 ({target_seconds}秒)\n"
+                f"  🎬 目标分镜数: 约{target_shots}个\n"
+                f"  📏 时长档位: {adjusted_length}\n\n"
+                f"重新生成将清空现有分镜，是否继续？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if confirm != QMessageBox.StandardButton.Yes:
+                return
+        else:
+            confirm = QMessageBox.question(
+                self, "🤖 AI 生成分镜",
+                f"将根据故事内容自动生成分镜脚本：\n\n"
+                f"  📝 故事字数: {char_count}\n"
+                f"  ⏱️ 目标时长: {target_seconds // 60}分钟 ({target_seconds}秒)\n"
+                f"  🎬 目标分镜数: 约{target_shots}个\n"
+                f"  📏 时长档位: {adjusted_length}\n\n"
+                f"是否开始生成？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes,
+            )
+            if confirm != QMessageBox.StandardButton.Yes:
+                return
+
+        if not self.producer:
+            self.producer = AnimationProducer(self.client, self.project, self._log)
+
+        self.project.storyboard.clear()
+        self._log(f"🤖 AI 重新生成分镜: 目标 {target_shots} 个, 目标时长 {target_seconds}秒 ({target_seconds // 60}分钟)")
+
+        if hasattr(self, 'ai_gen_sb_btn'):
+            self.ai_gen_sb_btn.setEnabled(False)
+            self.ai_gen_sb_btn.setText("⏳\n生成中...")
+
+        self._worker = ProductionWorker(self.producer, step='storyboard_script')
+        self._start_worker(self._worker, self._on_ai_storyboard_regenerated)
+
+    def _on_ai_storyboard_regenerated(self, result: dict):
+        if hasattr(self, 'ai_gen_sb_btn'):
+            self.ai_gen_sb_btn.setEnabled(True)
+            self.ai_gen_sb_btn.setText("🤖\nAI生成分镜")
+
+        count = result.get('storyboard', 0)
+        self._log(f"✅ AI 分镜生成完成，共 {count} 个分镜")
+        self._refresh_storyboard_table()
+        self._update_wizard_steps()
+
+        if count > 0 and hasattr(self, 'storyboard_table'):
+            self.storyboard_table.setCurrentCell(0, 0)
+
+        total_dur = sum(sb.duration for sb in self.project.storyboard) if self.project else 0
+        msg = QMessageBox(self)
+        msg.setWindowTitle("✅ AI 分镜生成完成")
+        msg.setIcon(QMessageBox.Icon.Information)
+        msg.setText(f"成功生成 {count} 个分镜，总时长 {total_dur:.0f}秒 ({total_dur / 60:.1f}分钟)")
+        msg.setInformativeText("接下来可以生成分镜图片和视频。")
+        gen_img_btn = msg.addButton("🖼️ 生成分镜图片", QMessageBox.ButtonRole.ActionRole)
+        ok_btn = msg.addButton("我知道了", QMessageBox.ButtonRole.AcceptRole)
+        msg.exec()
+        if msg.clickedButton() == gen_img_btn:
+            self._start_storyboard_image_generation()
 
     def _on_generate_storyboard(self):
         """生成分镜（按当前选择的集数生成分镜，而非所有场景）"""

@@ -482,19 +482,29 @@ class AgnesAIClient:
         scene_context: str = "",
         characters: List[dict] = None,
         auto_count: bool = False,
+        progress_callback: Callable = None,
     ) -> List[dict]:
         """生成分镜脚本
 
         Args:
             auto_count: 若为 True，让 AI 根据故事内容自行决定分镜数量和总时长，
                         scene_count/total_duration 仅作为参考上限
+            progress_callback: 分批生成时的进度回调，签名 callback(batch, total_batches)
         """
         if total_duration is None:
             total_duration = scene_count * 5
         
-        # 限制分镜数量：5分钟最多50个
-        max_scenes_for_duration = (total_duration // 60) * 10  # 每分钟最多10个分镜
-        scene_count = min(scene_count, max(max_scenes_for_duration, 10))
+        max_scenes_for_duration = max((total_duration // 60) * 10, 15)
+        scene_count = min(scene_count, max_scenes_for_duration)
+
+        BATCH_THRESHOLD = 40
+        BATCH_SIZE = 30
+
+        if scene_count > BATCH_THRESHOLD:
+            return await self._generate_script_batched(
+                story, scene_count, total_duration, scene_context,
+                characters, auto_count, BATCH_SIZE, progress_callback,
+            )
         
         scene_context_text = (
             f"\n已提取的场景（每个场景至少对应一个分镜；S1/S2/... 是场景编号，"
@@ -515,17 +525,16 @@ class AgnesAIClient:
         
         if auto_count:
             count_instruction = (
-                f"请根据故事内容的丰富程度，自行决定分镜数量和总时长。\n"
-                f"参考上限：最多{scene_count}个分镜，总时长不超过{total_duration}秒（约{total_duration // 60}分钟）。\n"
-                f"如果故事内容丰富、情节复杂，可以多用分镜充分讲述；如果故事简短，可以减少分镜数。\n"
-                f"原则：**必须完整讲述整个故事，不能省略任何情节**。宁可多几个分镜，也不要压缩故事内容。\n"
-                f"每个分镜时长4-12秒，请合理分配节奏。"
+                f"请将以下故事拆分为约{scene_count}个分镜，目标总时长约{total_duration}秒（约{total_duration // 60}分钟）。\n"
+                f"**必须完整讲述整个故事，不能省略任何情节**。宁可多几个分镜，也不要压缩故事内容。\n"
+                f"如果故事内容丰富、情节复杂，应接近或达到{scene_count}个分镜；如果故事确实简短，可以适当减少。\n"
+                f"每个分镜时长4-12秒，请合理分配节奏，总时长应接近{total_duration}秒。"
             )
             duration_rule = (
-                f"3. 所有分镜的 duration 总和应与你自行决定的总时长一致，"
-                f"不超过{total_duration}秒（约{total_duration // 60}分钟）"
+                f"3. 所有分镜的 duration 总和应接近{total_duration}秒（约{total_duration // 60}分钟），"
+                f"允许±10%浮动，但不得低于{int(total_duration * 0.7)}秒"
             )
-            avg_hint = f"平均每个分镜约{total_duration // max(scene_count, 1)}秒，可根据情节轻重调整"
+            avg_hint = f"约{scene_count}个分镜，平均每个分镜约{total_duration // max(scene_count, 1)}秒，可根据情节轻重调整"
         else:
             count_instruction = f"请将以下故事拆分成{scene_count}个分镜场景，总时长严格控制在{total_duration}秒（约{total_duration // 60}分钟）。"
             duration_rule = f"3. 所有分镜的 duration 总和必须**严格等于** {total_duration} 秒（约{total_duration // 60}分钟），这是硬性要求！"
@@ -672,6 +681,101 @@ class AgnesAIClient:
                                         item["dialogue_role"] = rn
             return storyboard
         raise ValueError("分镜生成结果中没有找到 JSON 数组")
+
+    async def _generate_script_batched(
+        self,
+        story: str,
+        scene_count: int,
+        total_duration: int,
+        scene_context: str,
+        characters: List[dict],
+        auto_count: bool,
+        batch_size: int,
+        progress_callback: Callable = None,
+    ) -> List[dict]:
+        """分批生成分镜脚本：当 scene_count > 40 时，拆分为多批生成以减少单次 token 量。
+
+        策略：将故事文本按段落拆分为 N 段，每段生成 batch_size 个分镜，
+        最后合并所有批次结果并重新编号。
+        """
+        import sys
+
+        num_batches = (scene_count + batch_size - 1) // batch_size
+        actual_batch_size = scene_count // num_batches
+        remainder = scene_count % num_batches
+
+        paragraphs = [p.strip() for p in story.split("\n") if p.strip()]
+        if len(paragraphs) < num_batches:
+            paragraphs = [story]
+            while len(paragraphs) < num_batches:
+                mid = len(paragraphs[0]) // 2
+                split_pos = paragraphs[0].rfind("。", 0, mid + len(paragraphs[0]) // 2)
+                if split_pos <= 0:
+                    split_pos = mid
+                paragraphs = [paragraphs[0][:split_pos + 1], paragraphs[0][split_pos + 1:]]
+
+        batch_stories = []
+        if len(paragraphs) >= num_batches:
+            chunk_size = len(paragraphs) // num_batches
+            for i in range(num_batches):
+                start_idx = i * chunk_size
+                end_idx = start_idx + chunk_size if i < num_batches - 1 else len(paragraphs)
+                batch_stories.append("\n".join(paragraphs[start_idx:end_idx]))
+        else:
+            batch_stories = paragraphs[:num_batches]
+
+        all_storyboards = []
+        batch_duration_per = total_duration // num_batches
+
+        for batch_idx in range(num_batches):
+            is_last = batch_idx == num_batches - 1
+            current_batch_count = actual_batch_size + (remainder if is_last else 0)
+            current_duration = batch_duration_per + (total_duration - batch_duration_per * num_batches if is_last else 0)
+            batch_story = batch_stories[batch_idx]
+
+            print(
+                f"[API] 📦 分批生成 {batch_idx + 1}/{num_batches}："
+                f"目标{current_batch_count}个分镜，约{current_duration // 60}分钟，"
+                f"故事片段{len(batch_story)}字",
+                file=sys.stderr, flush=True,
+            )
+
+            if progress_callback:
+                try:
+                    progress_callback(batch_idx + 1, num_batches)
+                except Exception:
+                    pass
+
+            batch_result = await self.generate_script(
+                batch_story,
+                scene_count=current_batch_count,
+                total_duration=current_duration,
+                scene_context=scene_context,
+                characters=characters,
+                auto_count=auto_count,
+            )
+
+            if batch_result:
+                all_storyboards.extend(batch_result)
+                print(
+                    f"[API] 📦 批次 {batch_idx + 1} 完成：生成 {len(batch_result)} 个分镜",
+                    file=sys.stderr, flush=True,
+                )
+            else:
+                print(
+                    f"[API] ⚠️ 批次 {batch_idx + 1} 返回空结果，跳过",
+                    file=sys.stderr, flush=True,
+                )
+
+        for i, item in enumerate(all_storyboards, start=1):
+            if isinstance(item, dict):
+                item["scene_number"] = i
+
+        print(
+            f"[API] ✅ 分批生成完成：共 {len(all_storyboards)} 个分镜",
+            file=sys.stderr, flush=True,
+        )
+        return all_storyboards
 
     def _repair_storyboard_json(self, raw: str) -> list:
         """修复 AI 返回的常见 JSON 问题：未转义字符、截断、尾随逗号等
@@ -1015,6 +1119,7 @@ class AgnesAIClient:
         audios: Optional[list] = None,
         mode: Optional[str] = None,  # 添加 mode 参数：text, keyframe, reference
         extra_images: Optional[list] = None,  # 额外参考图（场景图/角色图，base64或URL），reference模式使用，最多5张
+        aspect_ratio: str = "16:9",
     ) -> bytes:
         """生成视频（按 Agnes 官方异步任务模式：创建任务 -> 轮询状态 -> 下载）
         
@@ -1044,8 +1149,8 @@ class AgnesAIClient:
             "model": Settings.VIDEO_MODEL,
             "prompt": prompt,
             "seconds": str(actual_duration),
-            "size": "720P",
-            "aspect_ratio": "16:9",
+            "size": size,
+            "aspect_ratio": aspect_ratio,
         }
         
         # 确定 mode

@@ -93,6 +93,21 @@ class StoryboardPage(QWidget):
 
         button_layout = QVBoxLayout()
         button_layout.setSpacing(6)
+        self.ai_gen_sb_btn = QPushButton("🤖\nAI生成分镜")
+        self.ai_gen_sb_btn.setToolTip(
+            "根据故事内容和时长自动生成分镜脚本\n"
+            "（清空旧分镜，按故事字数智能推断目标时长和分镜数）"
+        )
+        self.ai_gen_sb_btn.setStyleSheet("""
+            QPushButton {
+                background: #8b5cf6; color: white; font-weight: bold;
+                border-radius: 6px; font-size: 12px; padding: 8px 4px;
+            }
+            QPushButton:hover { background: #7c3aed; }
+            QPushButton:disabled { background: #cbd5e1; color: #94a3b8; }
+        """)
+        self.ai_gen_sb_btn.clicked.connect(controller._on_ai_regenerate_storyboard)
+        button_layout.addWidget(self.ai_gen_sb_btn)
         for text, tooltip, callback, object_name in (
             ("➕\n插入分镜", "在当前位置插入一个新的分镜", controller._on_add_storyboard, ""),
             ("⬆️\n上移", "将选中的分镜向上移动", controller._on_move_storyboard_up, ""),
